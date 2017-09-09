@@ -41,13 +41,24 @@ use net_traits::request::{CredentialsMode, Destination, RequestInit};
 use network_listener::{NetworkListener, PreInvoke};
 use script_thread::ScriptThread;
 use servo_url::ServoUrl;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::mem;
 use std::rc::Rc;
+use playground::{self, player};
 use std::sync::{Arc, Mutex};
 use task_source::TaskSource;
 use time::{self, Timespec, Duration};
+use dom::bindings::trace::JSTraceable;
+use js::jsapi::JSTracer;
+use serde_json;
+
+// TODO(philn): this doesn't belong here.
+#[allow(unsafe_code)]
+unsafe impl JSTraceable for RefCell<playground::player::Player> {
+    unsafe fn trace(&self, trc: *mut JSTracer) {
+    }
+}
 
 #[dom_struct]
 // FIXME(nox): A lot of tasks queued for this element should probably be in the
@@ -82,6 +93,13 @@ pub struct HTMLMediaElement {
     /// Play promises which are soon to be fulfilled by a queued task.
     #[ignore_malloc_size_of = "promises are hard"]
     in_flight_play_promises_queue: DomRefCell<VecDeque<(Box<[Rc<Promise>]>, ErrorResult)>>,
+    /// The details of the video currently related to this media element.
+    // FIXME(nox): Why isn't this in HTMLVideoElement?
+    video: DomRefCell<Option<VideoMedia>>,
+    /// Whether the media metadata has been completely received.
+    have_metadata: Cell<bool>,
+    #[ignore_heap_size_of = "oops"]
+    player: RefCell<player::Player>,
 }
 
 /// <https://html.spec.whatwg.org/multipage/#dom-media-networkstate>
@@ -105,12 +123,24 @@ enum ReadyState {
     HaveEnoughData = HTMLMediaElementConstants::HAVE_ENOUGH_DATA as u8,
 }
 
+#[derive(HeapSizeOf, JSTraceable, Debug)]
+pub struct VideoMedia {
+    format: String,
+    #[ignore_heap_size_of = "defined in time"]
+    duration: Duration,
+    width: u32,
+    height: u32,
+    video: String,
+    audio: Option<String>,
+}
+
 impl HTMLMediaElement {
     pub fn new_inherited(
         tag_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
     ) -> Self {
+        playground::initialize();
         Self {
             htmlelement: HTMLElement::new_inherited(tag_name, prefix, document),
             network_state: Cell::new(NetworkState::Empty),
@@ -126,6 +156,9 @@ impl HTMLMediaElement {
             delaying_the_load_event_flag: Default::default(),
             pending_play_promises: Default::default(),
             in_flight_play_promises_queue: Default::default(),
+            video: DomRefCell::new(None),
+            have_metadata: Cell::new(false),
+            player: RefCell::new(player::Player::new()),
         }
     }
 
@@ -236,7 +269,69 @@ impl HTMLMediaElement {
         // Not applicable here, the promise is returned from Play.
     }
 
-    /// <https://html.spec.whatwg.org/multipage/#internal-pause-steps>
+    fn start(&self) {
+
+        let (action_sender, action_receiver) = ipc::channel().unwrap();
+        let trusted_node = Trusted::new(self);
+        let win = window_from_node(self);
+        let task_source = win.dom_manipulation_task_source();
+        let wrapper = win.get_runnable_wrapper();
+        ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
+            let event: playground::player::PlayerEvent = message.to().unwrap();
+            println!("Event received: {:?}", event);
+            let task = FirePlayerEventMicrotask::new(trusted_node.clone(), event);
+            let _ = task_source.queue_with_wrapper(box task, &wrapper);
+        });
+
+        let mut player = self.player.borrow_mut();
+        player.start();
+        player.register_event_handler(move |payload| {
+            let event: playground::player::PlayerEvent = serde_json::from_str(&payload).unwrap(); 
+            action_sender.send(event).unwrap();
+        });
+    }
+
+    pub fn handle_player_event(&self, event: &playground::player::PlayerEvent) {
+        match *event {
+            playground::player::PlayerEvent::MetadataUpdated(ref metadata) => {
+                println!("Metadata: {:?}", metadata);
+                if !self.have_metadata.get() {
+                    // https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list
+                    // => "Once enough of the media data has been fetched to determine the duration..."
+                    if let Some(dur) = metadata.duration {
+                        *self.video.borrow_mut() = Some(VideoMedia {
+                            format: metadata.format.clone(),
+                            duration: Duration::seconds(dur.as_secs() as i64) +
+                                Duration::nanoseconds(dur.subsec_nanos() as i64),
+                            width: metadata.width,
+                            height: metadata.height,
+                            video: metadata.video_tracks[0].clone(),
+                            audio: Some(metadata.audio_tracks[0].clone()),
+                        });
+
+                        // Step 6
+                        self.change_ready_state(HAVE_METADATA);
+                        self.have_metadata.set(true);
+                    }
+                } else {
+                    self.change_ready_state(HAVE_CURRENT_DATA);
+                }
+            }
+            playground::player::PlayerEvent::StateChanged(ref state) => {
+                match *state {
+                    playground::player::PlaybackState::Paused => {
+                        println!("Paused!!");
+                        self.paused.set(true);
+                    }
+                    _ => {}
+                }
+            }
+            playground::player::PlayerEvent::EndOfStream => {
+                println!("EOS!");
+            }
+         }
+     }
+ 
     fn internal_pause_steps(&self) {
         // Step 1.
         self.autoplaying.set(false);
@@ -287,6 +382,10 @@ impl HTMLMediaElement {
     fn notify_about_playing(&self) {
         // Step 1.
         self.take_pending_play_promises(Ok(()));
+
+        // phil
+        let mut player = self.player.borrow_mut();
+        player.play();
 
         // Step 2.
         let window = window_from_node(self);
@@ -603,6 +702,7 @@ impl HTMLMediaElement {
                 };
 
                 let context = Arc::new(Mutex::new(HTMLMediaElementContext::new(self)));
+                self.start();
                 let (action_sender, action_receiver) = ipc::channel().unwrap();
                 let window = window_from_node(self);
                 let listener = NetworkListener {
@@ -968,16 +1068,40 @@ impl MicrotaskRunnable for MediaElementMicrotask {
     }
 }
 
+struct FirePlayerEventMicrotask {
+    elem: Trusted<HTMLMediaElement>,
+    event_: playground::player::PlayerEvent,
+}
+
+impl FirePlayerEventMicrotask {
+    fn new(
+        target: Trusted<HTMLMediaElement>,
+        event_: playground::player::PlayerEvent,
+    ) -> FirePlayerEventMicrotask {
+        FirePlayerEventMicrotask {
+            elem: target,
+            event_: event_,
+        }
+    }
+}
+
+impl MicrotaskRunnable for FirePlayerEventMicrotask {
+    fn handler(&self) {
+        self.elem.root().handle_player_event(&self.event_);
+    }
+}
+
 enum Resource {
     Object,
     Url(ServoUrl),
 }
 
+#[derive(Clone)]
 struct HTMLMediaElementContext {
     /// The element that initiated the request.
     elem: Trusted<HTMLMediaElement>,
     /// The response body received to date.
-    data: Vec<u8>,
+    //data: Vec<u8>,
     /// The response metadata received to date.
     metadata: Option<Metadata>,
     /// The generation of the media element when this fetch started.
@@ -985,7 +1109,7 @@ struct HTMLMediaElementContext {
     /// Time of last progress notification.
     next_progress_event: Timespec,
     /// Whether the media metadata has been completely received.
-    have_metadata: bool,
+    //have_metadata: bool,
     /// True if this response is invalid and should be ignored.
     ignore_response: bool,
 }
@@ -1017,23 +1141,23 @@ impl FetchResponseListener for HTMLMediaElementContext {
         }
     }
 
-    fn process_response_chunk(&mut self, mut payload: Vec<u8>) {
+    fn process_response_chunk(&mut self, payload: Vec<u8>) {
         if self.ignore_response {
             // An error was received previously, skip processing the payload.
             return;
         }
 
-        self.data.append(&mut payload);
-
         let elem = self.elem.root();
+        let player = elem.player.borrow_mut();
+        player.push_data(payload.as_ref());
 
         // https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list
         // => "Once enough of the media data has been fetched to determine the duration..."
-        if !self.have_metadata {
-            self.check_metadata(&elem);
-        } else {
-            elem.change_ready_state(ReadyState::HaveCurrentData);
-        }
+        // if !self.have_metadata {
+        //     self.check_metadata(&elem);
+        // } else {
+        //     elem.change_ready_state(ReadyState::HaveCurrentData);
+        // }
 
         // https://html.spec.whatwg.org/multipage/#concept-media-load-resource step 4,
         // => "If mode is remote" step 2
@@ -1058,11 +1182,12 @@ impl FetchResponseListener for HTMLMediaElementContext {
 
         // => "If the media data can be fetched but is found by inspection to be in an unsupported
         //     format, or can otherwise not be rendered at all"
-        if !self.have_metadata {
-            elem.queue_dedicated_media_source_failure_steps();
-        }
+        // if !elem.have_metadata.get() {
+        //     elem.queue_dedicated_media_source_failure_steps();
+        // }
         // => "Once the entire media resource has been fetched..."
-        else if status.is_ok() {
+        if status.is_ok() {
+            println!("ok");
             elem.change_ready_state(ReadyState::HaveEnoughData);
 
             elem.upcast::<EventTarget>().fire_event(atom!("progress"));
@@ -1103,11 +1228,9 @@ impl HTMLMediaElementContext {
     fn new(elem: &HTMLMediaElement) -> HTMLMediaElementContext {
         HTMLMediaElementContext {
             elem: Trusted::new(elem),
-            data: vec![],
             metadata: None,
             generation_id: elem.generation_id.get(),
             next_progress_event: time::get_time() + Duration::milliseconds(350),
-            have_metadata: false,
             ignore_response: false,
         }
     }
