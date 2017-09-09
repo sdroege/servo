@@ -66,6 +66,7 @@ offscreen_gl_context = { version = "0.11", features = ["serde"] }
 open = "1.1.1"
 parking_lot = "0.4"
 phf = "0.7.18"
+playground = {path = "../playground"}
 profile_traits = {path = "../profile_traits"}
 ref_filter_map = "1.0.1"
 ref_slice = "1.0"
@@ -75,6 +76,7 @@ script_plugins = {path = "../script_plugins"}
 script_traits = {path = "../script_traits"}
 selectors = { path = "../selectors" }
 serde = "1.0"
+serde_json = "1.0"
 servo_arc = {path = "../servo_arc"}
 servo_atoms = {path = "../atoms"}
 servo_config = {path = "../config"}

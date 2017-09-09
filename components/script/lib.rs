@@ -25,7 +25,6 @@
 
 extern crate angle;
 extern crate app_units;
-extern crate audio_video_metadata;
 extern crate base64;
 #[macro_use]
 extern crate bitflags;
@@ -75,6 +74,7 @@ extern crate offscreen_gl_context;
 extern crate open;
 extern crate parking_lot;
 extern crate phf;
+extern crate playground;
 #[macro_use]
 extern crate profile_traits;
 extern crate ref_filter_map;
@@ -84,6 +84,7 @@ extern crate script_layout_interface;
 extern crate script_traits;
 extern crate selectors;
 extern crate serde;
+extern crate serde_json;
 extern crate servo_arc;
 #[macro_use] extern crate servo_atoms;
 extern crate servo_config;
