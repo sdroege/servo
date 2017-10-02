@@ -54,7 +54,7 @@ use js::jsapi::JSTracer;
 // TODO(philn): this doesn't belong here.
 #[allow(unsafe_code)]
 unsafe impl JSTraceable for RefCell<playground::player::Player> {
-    unsafe fn trace(&self, trc: *mut JSTracer) {
+    unsafe fn trace(&self, _trc: *mut JSTracer) {
     }
 }
 
