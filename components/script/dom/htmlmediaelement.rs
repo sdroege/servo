@@ -285,7 +285,7 @@ impl HTMLMediaElement {
             );
         });
 
-        let mut player = self.player.borrow_mut();
+        let player = self.player.borrow();
         player.start();
         player.register_event_handler(action_sender);
     }
@@ -383,7 +383,7 @@ impl HTMLMediaElement {
         self.take_pending_play_promises(Ok(()));
 
         // phil
-        let mut player = self.player.borrow_mut();
+        let player = self.player.borrow();
         player.play();
 
         // Step 2.
@@ -1124,7 +1124,7 @@ impl FetchResponseListener for HTMLMediaElementContext {
         }
 
         let elem = self.elem.root();
-        let player = elem.player.borrow_mut();
+        let player = elem.player.borrow();
         player.push_data(payload.as_ref());
 
         // https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list
