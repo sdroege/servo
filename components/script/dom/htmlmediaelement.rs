@@ -1125,7 +1125,7 @@ impl FetchResponseListener for HTMLMediaElementContext {
 
         let elem = self.elem.root();
         let player = elem.player.borrow();
-        player.push_data(payload.as_ref());
+        player.push_data(payload);
 
         // https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list
         // => "Once enough of the media data has been fetched to determine the duration..."
