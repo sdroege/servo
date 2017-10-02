@@ -49,7 +49,6 @@ use task_source::TaskSource;
 use time::{self, Timespec, Duration};
 use dom::bindings::trace::JSTraceable;
 use js::jsapi::JSTracer;
-use serde_json;
 
 // TODO(philn): this doesn't belong here.
 #[allow(unsafe_code)]
@@ -265,7 +264,6 @@ impl HTMLMediaElement {
     }
 
     fn start(&self) {
-
         let (action_sender, action_receiver) = ipc::channel().unwrap();
         let trusted_node = Trusted::new(self);
         let win = window_from_node(self);
@@ -285,10 +283,7 @@ impl HTMLMediaElement {
 
         let mut player = self.player.borrow_mut();
         player.start();
-        player.register_event_handler(move |payload| {
-            let event: playground::player::PlayerEvent = serde_json::from_str(&payload).unwrap(); 
-            action_sender.send(event).unwrap();
-        });
+        player.register_event_handler(action_sender);
     }
 
     pub fn handle_player_event(&self, event: &playground::player::PlayerEvent) {
