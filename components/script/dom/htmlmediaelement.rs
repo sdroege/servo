@@ -1156,6 +1156,9 @@ impl FetchResponseListener for HTMLMediaElementContext {
         }
         let elem = self.elem.root();
 
+        let player = elem.player.borrow();
+        player.end_of_stream();
+
         // => "If the media data can be fetched but is found by inspection to be in an unsupported
         //     format, or can otherwise not be rendered at all"
         // if !elem.have_metadata.get() {
