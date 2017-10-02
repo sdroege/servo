@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use audio_video_metadata;
 use document_loader::{LoadBlocker, LoadType};
 use dom::attr::Attr;
 use dom::bindings::cell::DomRefCell;
@@ -275,12 +274,17 @@ impl HTMLMediaElement {
         let trusted_node = Trusted::new(self);
         let win = window_from_node(self);
         let task_source = win.dom_manipulation_task_source();
-        let wrapper = win.get_runnable_wrapper();
+        let task_canceller = win.task_canceller();
         ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
             let event: playground::player::PlayerEvent = message.to().unwrap();
             println!("Event received: {:?}", event);
-            let task = FirePlayerEventMicrotask::new(trusted_node.clone(), event);
-            let _ = task_source.queue_with_wrapper(box task, &wrapper);
+            let element = trusted_node.clone();
+            let _ = task_source.queue_with_canceller(
+                task!(handle_fire_player_event: move || {
+                    element.root().handle_player_event(&event);
+                }),
+                &task_canceller,
+            );
         });
 
         let mut player = self.player.borrow_mut();
@@ -310,11 +314,11 @@ impl HTMLMediaElement {
                         });
 
                         // Step 6
-                        self.change_ready_state(HAVE_METADATA);
+                        self.change_ready_state(ReadyState::HaveMetadata);
                         self.have_metadata.set(true);
                     }
                 } else {
-                    self.change_ready_state(HAVE_CURRENT_DATA);
+                    self.change_ready_state(ReadyState::HaveCurrentData);
                 }
             }
             playground::player::PlayerEvent::StateChanged(ref state) => {
@@ -1065,29 +1069,6 @@ impl MicrotaskRunnable for MediaElementMicrotask {
                 }
             },
         }
-    }
-}
-
-struct FirePlayerEventMicrotask {
-    elem: Trusted<HTMLMediaElement>,
-    event_: playground::player::PlayerEvent,
-}
-
-impl FirePlayerEventMicrotask {
-    fn new(
-        target: Trusted<HTMLMediaElement>,
-        event_: playground::player::PlayerEvent,
-    ) -> FirePlayerEventMicrotask {
-        FirePlayerEventMicrotask {
-            elem: target,
-            event_: event_,
-        }
-    }
-}
-
-impl MicrotaskRunnable for FirePlayerEventMicrotask {
-    fn handler(&self) {
-        self.elem.root().handle_player_event(&self.event_);
     }
 }
 
