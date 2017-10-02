@@ -49,12 +49,11 @@ use task_source::TaskSource;
 use time::{self, Timespec, Duration};
 use dom::bindings::trace::JSTraceable;
 use js::jsapi::JSTracer;
-use serde_json;
 
 // TODO(philn): this doesn't belong here.
 #[allow(unsafe_code)]
 unsafe impl JSTraceable for RefCell<playground::player::Player> {
-    unsafe fn trace(&self, trc: *mut JSTracer) {
+    unsafe fn trace(&self, _trc: *mut JSTracer) {
     }
 }
 
@@ -265,7 +264,6 @@ impl HTMLMediaElement {
     }
 
     fn start(&self) {
-
         let (action_sender, action_receiver) = ipc::channel().unwrap();
         let trusted_node = Trusted::new(self);
         let win = window_from_node(self);
@@ -283,12 +281,9 @@ impl HTMLMediaElement {
             );
         });
 
-        let mut player = self.player.borrow_mut();
+        let player = self.player.borrow();
         player.start();
-        player.register_event_handler(move |payload| {
-            let event: playground::player::PlayerEvent = serde_json::from_str(&payload).unwrap(); 
-            action_sender.send(event).unwrap();
-        });
+        player.register_event_handler(action_sender);
     }
 
     pub fn handle_player_event(&self, event: &playground::player::PlayerEvent) {
@@ -385,7 +380,7 @@ impl HTMLMediaElement {
         self.take_pending_play_promises(Ok(()));
 
         // phil
-        let mut player = self.player.borrow_mut();
+        let player = self.player.borrow();
         player.play();
 
         // Step 2.
@@ -1113,8 +1108,8 @@ impl FetchResponseListener for HTMLMediaElementContext {
         }
 
         let elem = self.elem.root();
-        let player = elem.player.borrow_mut();
-        player.push_data(payload.as_ref());
+        let player = elem.player.borrow();
+        player.push_data(payload);
 
         // https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list
         // => "Once enough of the media data has been fetched to determine the duration..."
@@ -1144,6 +1139,9 @@ impl FetchResponseListener for HTMLMediaElementContext {
             return;
         }
         let elem = self.elem.root();
+
+        let player = elem.player.borrow();
+        player.end_of_stream();
 
         // => "If the media data can be fetched but is found by inspection to be in an unsupported
         //     format, or can otherwise not be rendered at all"
