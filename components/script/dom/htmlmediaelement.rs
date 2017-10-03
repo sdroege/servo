@@ -290,7 +290,7 @@ impl HTMLMediaElement {
         player.register_event_handler(action_sender);
     }
 
-    pub fn handle_player_event(&self, event: &playground::player::PlayerEvent) {
+    fn handle_player_event(&self, event: &playground::player::PlayerEvent) {
         match *event {
             playground::player::PlayerEvent::MetadataUpdated(ref metadata) => {
                 println!("Metadata: {:?}", metadata);
