@@ -328,6 +328,11 @@ impl HTMLMediaElement {
             playground::player::PlayerEvent::EndOfStream => {
                 println!("EOS!");
             }
+            playground::player::PlayerEvent::Error => {
+                println!("Error!");
+                self.error.set(Some(&*MediaError::new(&*window_from_node(&*self), MEDIA_ERR_DECODE)));
+                self.upcast::<EventTarget>().fire_event(atom!("error"));
+            }
          }
      }
  
