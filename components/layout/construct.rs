@@ -23,7 +23,7 @@ use flow::{self, AbsoluteDescendants, Flow, FlowClass, ImmutableFlowUtils};
 use flow::{CAN_BE_FRAGMENTED, IS_ABSOLUTELY_POSITIONED, MARGINS_CANNOT_COLLAPSE};
 use flow::{MutableFlowUtils, MutableOwnedFlowUtils};
 use flow_ref::FlowRef;
-use fragment::{CanvasFragmentInfo, ImageFragmentInfo, InlineAbsoluteFragmentInfo, SvgFragmentInfo};
+use fragment::{CanvasFragmentInfo, ImageFragmentInfo, InlineAbsoluteFragmentInfo, SvgFragmentInfo, MediaFragmentInfo};
 use fragment::{Fragment, GeneratedContentInfo, IframeFragmentInfo};
 use fragment::{IS_INLINE_FLEX_ITEM, IS_BLOCK_FLEX_ITEM};
 use fragment::{InlineAbsoluteHypotheticalFragmentInfo, TableColumnFragmentInfo};
@@ -379,6 +379,10 @@ impl<'a, ConcreteThreadSafeLayoutNode: ThreadSafeLayoutNode>
             Some(LayoutNodeType::Element(LayoutElementType::SVGSVGElement)) => {
                 let data = node.svg_data().unwrap();
                 SpecificFragmentInfo::Svg(box SvgFragmentInfo::new(data))
+            }
+            Some(LayoutNodeType::Element(LayoutElementType::HTMLMediaElement)) => {
+                let data = node.media_data().unwrap();
+                SpecificFragmentInfo::Media(box MediaFragmentInfo::new(data))
             }
             _ => {
                 // This includes pseudo-elements.
@@ -1629,6 +1633,7 @@ impl<ConcreteThreadSafeLayoutNode> NodeUtils for ConcreteThreadSafeLayoutNode
             Some(LayoutNodeType::Element(LayoutElementType::HTMLImageElement)) |
             Some(LayoutNodeType::Element(LayoutElementType::HTMLIFrameElement)) |
             Some(LayoutNodeType::Element(LayoutElementType::HTMLCanvasElement)) |
+            Some(LayoutNodeType::Element(LayoutElementType::HTMLMediaElement)) |
             Some(LayoutNodeType::Element(LayoutElementType::SVGSVGElement)) => true,
             Some(LayoutNodeType::Element(LayoutElementType::HTMLObjectElement)) => self.has_object_data(),
             Some(LayoutNodeType::Element(_)) => false,

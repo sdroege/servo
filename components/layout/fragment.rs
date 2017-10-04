@@ -30,7 +30,7 @@ use msg::constellation_msg::{BrowsingContextId, PipelineId};
 use net_traits::image::base::{Image, ImageMetadata};
 use net_traits::image_cache::{ImageOrMetadataAvailable, UsePlaceholder};
 use range::*;
-use script_layout_interface::{HTMLCanvasData, HTMLCanvasDataSource};
+use script_layout_interface::{HTMLCanvasData, HTMLCanvasDataSource, HTMLMediaData, HTMLMediaFrameSource};
 use script_layout_interface::SVGSVGData;
 use script_layout_interface::wrapper_traits::{PseudoElementType, ThreadSafeLayoutElement, ThreadSafeLayoutNode};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
@@ -167,6 +167,7 @@ pub enum SpecificFragmentInfo {
 
     Iframe(IframeFragmentInfo),
     Image(Box<ImageFragmentInfo>),
+    Media(Box<MediaFragmentInfo>),
     Canvas(Box<CanvasFragmentInfo>),
     Svg(Box<SvgFragmentInfo>),
 
@@ -202,6 +203,7 @@ impl SpecificFragmentInfo {
         let flow =
             match *self {
                 SpecificFragmentInfo::Canvas(_) |
+                SpecificFragmentInfo::Media(_) |
                 SpecificFragmentInfo::GeneratedContent(_) |
                 SpecificFragmentInfo::Iframe(_) |
                 SpecificFragmentInfo::Image(_) |
@@ -228,6 +230,7 @@ impl SpecificFragmentInfo {
     pub fn get_type(&self) -> &'static str {
         match *self {
             SpecificFragmentInfo::Canvas(_) => "SpecificFragmentInfo::Canvas",
+            SpecificFragmentInfo::Media(_) => "SpecificFragmentInfo::Media",
             SpecificFragmentInfo::Generic => "SpecificFragmentInfo::Generic",
             SpecificFragmentInfo::GeneratedContent(_) => "SpecificFragmentInfo::GeneratedContent",
             SpecificFragmentInfo::Iframe(_) => "SpecificFragmentInfo::Iframe",
@@ -320,6 +323,27 @@ impl InlineAbsoluteFragmentInfo {
     pub fn new(flow_ref: FlowRef) -> InlineAbsoluteFragmentInfo {
         InlineAbsoluteFragmentInfo {
             flow_ref: flow_ref,
+        }
+    }
+}
+
+pub struct MediaFragmentInfo {
+    pub frame_source: Box<HTMLMediaFrameSource>,
+}
+
+// XXX
+impl Clone for MediaFragmentInfo {
+    fn clone(&self) -> MediaFragmentInfo {
+        MediaFragmentInfo {
+            frame_source: self.frame_source.clone_boxed(),
+        }
+    }
+}
+
+impl MediaFragmentInfo {
+    pub fn new(data: HTMLMediaData) -> MediaFragmentInfo {
+        MediaFragmentInfo {
+            frame_source: data.frame_source,
         }
     }
 }
@@ -845,6 +869,7 @@ impl Fragment {
                                                     -> QuantitiesIncludedInIntrinsicInlineSizes {
         match self.specific {
             SpecificFragmentInfo::Canvas(_) |
+            SpecificFragmentInfo::Media(_) |
             SpecificFragmentInfo::Generic |
             SpecificFragmentInfo::GeneratedContent(_) |
             SpecificFragmentInfo::Iframe(_) |
@@ -982,6 +1007,13 @@ impl Fragment {
                     Au(0)
                 }
             }
+            SpecificFragmentInfo::Media(ref info) => {
+                if let Some((_, width, _)) = info.frame_source.get_current_frame() {
+                    Au::from_px(width as i32)
+                } else {
+                    Au(0)
+                }
+            }
             SpecificFragmentInfo::Canvas(ref info) => info.dom_width,
             SpecificFragmentInfo::Svg(ref info) => info.dom_width,
             // Note: Currently for replaced element with no intrinsic size,
@@ -1005,6 +1037,13 @@ impl Fragment {
                     Au(0)
                 }
             }
+            SpecificFragmentInfo::Media(ref info) => {
+                if let Some((_, _, height)) = info.frame_source.get_current_frame() {
+                    Au::from_px(height as i32)
+                } else {
+                    Au(0)
+                }
+            },
             SpecificFragmentInfo::Canvas(ref info) => info.dom_height,
             SpecificFragmentInfo::Svg(ref info) => info.dom_height,
             SpecificFragmentInfo::Iframe(_) => Au::from_px(DEFAULT_REPLACED_HEIGHT),
@@ -1017,6 +1056,7 @@ impl Fragment {
         match self.specific {
             SpecificFragmentInfo::Image(_)  |
             SpecificFragmentInfo::Canvas(_) |
+            SpecificFragmentInfo::Media(_) |
             // TODO(stshine): According to the SVG spec, whether a SVG element has intrinsic
             // aspect ratio is determined by the `preserveAspectRatio` attribute. Since for
             // now SVG is far from implemented, we simply choose the default behavior that
@@ -1495,6 +1535,7 @@ impl Fragment {
             }
             SpecificFragmentInfo::Image(_) |
             SpecificFragmentInfo::Canvas(_) |
+            SpecificFragmentInfo::Media(_) |
             SpecificFragmentInfo::Iframe(_) |
             SpecificFragmentInfo::Svg(_) => {
                 let mut inline_size = match self.style.content_inline_size() {
@@ -1930,6 +1971,7 @@ impl Fragment {
                 panic!("Unscanned text fragments should have been scanned by now!")
             }
             SpecificFragmentInfo::Canvas(_) |
+            SpecificFragmentInfo::Media(_) |
             SpecificFragmentInfo::Image(_) |
             SpecificFragmentInfo::Iframe(_) |
             SpecificFragmentInfo::InlineBlock(_) |
@@ -2016,6 +2058,7 @@ impl Fragment {
                 panic!("Unscanned text fragments should have been scanned by now!")
             }
             SpecificFragmentInfo::Canvas(_) |
+            SpecificFragmentInfo::Media(_) |
             SpecificFragmentInfo::Iframe(_) |
             SpecificFragmentInfo::Image(_) |
             SpecificFragmentInfo::InlineBlock(_) |
@@ -2073,6 +2116,7 @@ impl Fragment {
         match self.specific {
             SpecificFragmentInfo::Iframe(_) |
             SpecificFragmentInfo::Canvas(_) |
+            SpecificFragmentInfo::Media(_) |
             SpecificFragmentInfo::Image(_) |
             SpecificFragmentInfo::Svg(_) => true,
             _ => false
@@ -2104,7 +2148,8 @@ impl Fragment {
         let inline_metrics = match self.specific {
             SpecificFragmentInfo::Canvas(_) | SpecificFragmentInfo::Iframe(_) |
             SpecificFragmentInfo::Image(_) | SpecificFragmentInfo::Svg(_) |
-            SpecificFragmentInfo::Generic | SpecificFragmentInfo::GeneratedContent(_) => {
+            SpecificFragmentInfo::Generic | SpecificFragmentInfo::GeneratedContent(_) |
+            SpecificFragmentInfo::Media(_) => {
                 let ascent = self.border_box.size.block + self.margin.block_end;
                 InlineMetrics {
                     space_above_baseline: ascent + self.margin.block_start,
@@ -2393,6 +2438,7 @@ impl Fragment {
             SpecificFragmentInfo::MulticolColumn |
             SpecificFragmentInfo::TableWrapper => false,
             SpecificFragmentInfo::Canvas(_) |
+            SpecificFragmentInfo::Media(_) |
             SpecificFragmentInfo::Generic |
             SpecificFragmentInfo::GeneratedContent(_) |
             SpecificFragmentInfo::Iframe(_) |
@@ -2855,6 +2901,7 @@ impl Fragment {
             SpecificFragmentInfo::TableRow |
             SpecificFragmentInfo::TableWrapper => false,
             SpecificFragmentInfo::Canvas(_) |
+            SpecificFragmentInfo::Media(_) |
             SpecificFragmentInfo::GeneratedContent(_) |
             SpecificFragmentInfo::Iframe(_) |
             SpecificFragmentInfo::Image(_) |
