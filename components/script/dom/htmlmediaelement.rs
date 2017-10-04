@@ -232,24 +232,23 @@ impl playground::player::FrameRenderer for WebrenderFrameRenderer {
     }
 }
 
-impl Drop for WebrenderFrameRenderer {
+impl Drop for WebrenderFrameRendererInner {
     fn drop(&mut self) {
-        let mut inner = self.inner.lock().unwrap();
         let mut updates = webrender_api::ResourceUpdates::new();
 
-        if let Some((image_key, _, _)) = inner.current_frame.take() {
+        if let Some((image_key, _, _)) = self.current_frame.take() {
             updates.delete_image(image_key);
         }
 
-        if let Some(image_key) = inner.old_frame.take() {
+        if let Some(image_key) = self.old_frame.take() {
             updates.delete_image(image_key);
         }
 
-        if let Some(image_key) = inner.very_old_frame.take() {
+        if let Some(image_key) = self.very_old_frame.take() {
             updates.delete_image(image_key);
         }
 
-        inner.webrender_api.update_resources(updates);
+        self.webrender_api.update_resources(updates);
     }
 }
 
