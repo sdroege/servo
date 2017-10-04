@@ -17,7 +17,7 @@ use dom::bindings::error::{Error, ErrorResult};
 use dom::bindings::inheritance::Castable;
 use dom::bindings::refcounted::Trusted;
 use dom::bindings::reflector::DomObject;
-use dom::bindings::root::{DomRoot, MutNullableDom};
+use dom::bindings::root::{DomRoot, MutNullableDom, LayoutDom};
 use dom::bindings::str::DOMString;
 use dom::blob::Blob;
 use dom::document::Document;
@@ -26,7 +26,7 @@ use dom::eventtarget::EventTarget;
 use dom::htmlelement::HTMLElement;
 use dom::htmlsourceelement::HTMLSourceElement;
 use dom::mediaerror::MediaError;
-use dom::node::{window_from_node, document_from_node, Node, UnbindContext};
+use dom::node::{window_from_node, document_from_node, Node, UnbindContext, NodeDamage};
 use dom::promise::Promise;
 use dom::virtualmethods::VirtualMethods;
 use dom_struct::dom_struct;
@@ -48,12 +48,20 @@ use playground::{self, player};
 use std::sync::{Arc, Mutex};
 use task_source::TaskSource;
 use time::{self, Timespec, Duration};
+use script_layout_interface::{HTMLMediaData, HTMLMediaFrameSource};
 use dom::bindings::trace::JSTraceable;
 use js::jsapi::JSTracer;
+use webrender_api;
 
 // TODO(philn): this doesn't belong here.
 #[allow(unsafe_code)]
 unsafe impl JSTraceable for RefCell<playground::player::Player> {
+    unsafe fn trace(&self, _trc: *mut JSTracer) {
+    }
+}
+
+#[allow(unsafe_code)]
+unsafe impl JSTraceable for WebrenderFrameRenderer {
     unsafe fn trace(&self, _trc: *mut JSTracer) {
     }
 }
@@ -98,6 +106,8 @@ pub struct HTMLMediaElement {
     have_metadata: Cell<bool>,
     #[ignore_heap_size_of = "oops"]
     player: RefCell<player::Player>,
+    #[ignore_heap_size_of = "oops"]
+    frame_renderer: WebrenderFrameRenderer,
 }
 
 /// <https://html.spec.whatwg.org/multipage/#dom-media-networkstate>
@@ -132,6 +142,88 @@ pub struct VideoMedia {
     audio: Option<String>,
 }
 
+#[derive(Clone)]
+pub struct WebrenderFrameRenderer {
+    inner: Arc<Mutex<WebrenderFrameRendererInner>>,
+}
+
+struct WebrenderFrameRendererInner{
+    webrender_api: webrender_api::RenderApi,
+    current_frame: Option<(webrender_api::ImageKey, i32, i32)>,
+}
+
+impl WebrenderFrameRenderer {
+    fn new(webrender_api_sender: webrender_api::RenderApiSender) -> WebrenderFrameRenderer {
+        WebrenderFrameRenderer {
+            inner: Arc::new(Mutex::new(WebrenderFrameRendererInner {
+                webrender_api: webrender_api_sender.create_api(),
+                current_frame: None,
+            })),
+        }
+    }
+}
+
+impl HTMLMediaFrameSource for WebrenderFrameRenderer {
+    fn get_current_frame(&self) -> Option<(webrender_api::ImageKey, i32, i32)> {
+        let inner = self.inner.lock().unwrap();
+        inner.current_frame.clone()
+    }
+
+    fn clone_boxed(&self) -> Box<HTMLMediaFrameSource> {
+        Box::new(self.clone())
+    }
+}
+
+impl WebrenderFrameRendererInner {
+    fn render(&mut self, frame: playground::player::Frame) {
+        let descriptor = webrender_api::ImageDescriptor {
+            width: frame.get_width() as u32,
+            height: frame.get_height() as u32,
+            stride: None, //Some(width * 4),
+            format: webrender_api::ImageFormat::BGRA8,
+            offset: 0,
+            is_opaque: false,
+        };
+        let data = webrender_api::ImageData::Raw(frame.get_data().clone());
+
+        let mut updates = webrender_api::ResourceUpdates::new();
+
+        match self.current_frame {
+            Some((ref image_key, ref mut width, ref mut height)) => {
+                updates.update_image(*image_key, descriptor, data, None);
+                *width = frame.get_width();
+                *height = frame.get_height();
+            },
+            None => {
+                let image_key = self.webrender_api.generate_image_key();
+                updates.add_image(image_key, descriptor, data, None);
+                self.current_frame = Some((image_key, frame.get_width(), frame.get_height()));
+            }
+        }
+
+        self.webrender_api.update_resources(updates);
+    }
+}
+
+impl playground::player::FrameRenderer for WebrenderFrameRenderer {
+    fn render(&self, frame: playground::player::Frame) {
+        self.inner.lock().unwrap().render(frame)
+    }
+}
+
+impl Drop for WebrenderFrameRenderer {
+    fn drop(&mut self) {
+        let mut inner = self.inner.lock().unwrap();
+        let mut updates = webrender_api::ResourceUpdates::new();
+
+        if let Some((image_key, _, _)) = inner.current_frame.take() {
+            updates.delete_image(image_key);
+        }
+
+        inner.webrender_api.update_resources(updates);
+    }
+}
+
 impl HTMLMediaElement {
     pub fn new_inherited(
         tag_name: LocalName,
@@ -157,6 +249,7 @@ impl HTMLMediaElement {
             video: DomRefCell::new(None),
             have_metadata: Cell::new(false),
             player: RefCell::new(player::Player::new()),
+            frame_renderer: WebrenderFrameRenderer::new(document.window().get_webrender_api_sender()),
         }
     }
 
@@ -287,6 +380,7 @@ impl HTMLMediaElement {
 
         let player = self.player.borrow();
         player.register_event_handler(action_sender);
+        player.register_frame_renderer(self.frame_renderer.clone());
         player.start();
     }
 
@@ -327,6 +421,9 @@ impl HTMLMediaElement {
             }
             playground::player::PlayerEvent::EndOfStream => {
                 println!("EOS!");
+            }
+            playground::player::PlayerEvent::FrameUpdated => {
+                self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
             }
             playground::player::PlayerEvent::Error => {
                 println!("Error!");
@@ -919,6 +1016,23 @@ impl HTMLMediaElement {
             return;
         }
         self.media_element_load_algorithm();
+    }
+}
+
+pub trait LayoutHTMLMediaElementHelpers {
+    fn data(&self) -> HTMLMediaData;
+}
+
+impl LayoutHTMLMediaElementHelpers for LayoutDom<HTMLMediaElement> {
+    #[allow(unsafe_code)]
+    fn data(&self) -> HTMLMediaData {
+        unsafe {
+            let media = &*self.unsafe_get();
+
+            HTMLMediaData {
+                frame_source: Box::new(media.frame_renderer.clone()),
+            }
+        }
     }
 }
 

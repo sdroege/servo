@@ -22,8 +22,9 @@ use floats::FloatKind;
 use flow::{AbsoluteDescendants, Flow, FlowClass, GetBaseFlow, ImmutableFlowUtils};
 use flow::{FlowFlags, MutableFlowUtils, MutableOwnedFlowUtils};
 use flow_ref::FlowRef;
-use fragment::{CanvasFragmentInfo, ImageFragmentInfo, InlineAbsoluteFragmentInfo, SvgFragmentInfo};
-use fragment::{Fragment, GeneratedContentInfo, IframeFragmentInfo, FragmentFlags};
+use fragment::{CanvasFragmentInfo, ImageFragmentInfo, InlineAbsoluteFragmentInfo, SvgFragmentInfo, MediaFragmentInfo};
+use fragment::{Fragment, GeneratedContentInfo, IframeFragmentInfo};
+use fragment::{IS_INLINE_FLEX_ITEM, IS_BLOCK_FLEX_ITEM};
 use fragment::{InlineAbsoluteHypotheticalFragmentInfo, TableColumnFragmentInfo};
 use fragment::{InlineBlockFragmentInfo, SpecificFragmentInfo, UnscannedTextFragmentInfo};
 use fragment::WhitespaceStrippingResult;
@@ -406,6 +407,10 @@ impl<'a, ConcreteThreadSafeLayoutNode: ThreadSafeLayoutNode>
             Some(LayoutNodeType::Element(LayoutElementType::SVGSVGElement)) => {
                 let data = node.svg_data().unwrap();
                 SpecificFragmentInfo::Svg(Box::new(SvgFragmentInfo::new(data)))
+            }
+            Some(LayoutNodeType::Element(LayoutElementType::HTMLMediaElement)) => {
+                let data = node.media_data().unwrap();
+                SpecificFragmentInfo::Media(box MediaFragmentInfo::new(data))
             }
             _ => {
                 // This includes pseudo-elements.
@@ -1705,6 +1710,7 @@ impl<ConcreteThreadSafeLayoutNode> NodeUtils for ConcreteThreadSafeLayoutNode
             Some(LayoutNodeType::Element(LayoutElementType::HTMLImageElement)) |
             Some(LayoutNodeType::Element(LayoutElementType::HTMLIFrameElement)) |
             Some(LayoutNodeType::Element(LayoutElementType::HTMLCanvasElement)) |
+            Some(LayoutNodeType::Element(LayoutElementType::HTMLMediaElement)) |
             Some(LayoutNodeType::Element(LayoutElementType::SVGSVGElement)) => true,
             Some(LayoutNodeType::Element(LayoutElementType::HTMLObjectElement)) => self.has_object_data(),
             Some(LayoutNodeType::Element(_)) => false,

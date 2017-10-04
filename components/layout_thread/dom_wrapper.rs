@@ -43,7 +43,7 @@ use script::layout_exports::{LayoutCharacterDataHelpers, LayoutDocumentHelpers};
 use script::layout_exports::{LayoutElementHelpers, LayoutNodeHelpers, LayoutDom, RawLayoutElementHelpers};
 use script::layout_exports::NodeFlags;
 use script::layout_exports::PendingRestyle;
-use script_layout_interface::{HTMLCanvasData, LayoutNodeType, SVGSVGData, TrustedNodeAddress};
+use script_layout_interface::{HTMLCanvasData, LayoutNodeType, SVGSVGData, HTMLMediaData, TrustedNodeAddress};
 use script_layout_interface::{OpaqueStyleAndLayoutData, StyleData};
 use script_layout_interface::wrapper_traits::{DangerousThreadSafeLayoutNode, GetLayoutData, LayoutNode};
 use script_layout_interface::wrapper_traits::{PseudoElementType, ThreadSafeLayoutElement, ThreadSafeLayoutNode};
@@ -959,6 +959,11 @@ impl<'ln> ThreadSafeLayoutNode for ServoThreadSafeLayoutNode<'ln> {
     fn svg_data(&self) -> Option<SVGSVGData> {
         let this = unsafe { self.get_jsmanaged() };
         this.svg_data()
+    }
+
+    fn media_data(&self) -> Option<HTMLMediaData> {
+        let this = unsafe { self.get_jsmanaged() };
+        this.media_data()
     }
 
     // Can return None if the iframe has no nested browsing context

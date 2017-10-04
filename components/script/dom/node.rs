@@ -37,6 +37,7 @@ use dom::eventtarget::EventTarget;
 use dom::globalscope::GlobalScope;
 use dom::htmlbodyelement::HTMLBodyElement;
 use dom::htmlcanvaselement::{HTMLCanvasElement, LayoutHTMLCanvasElementHelpers};
+use dom::htmlmediaelement::{HTMLMediaElement, LayoutHTMLMediaElementHelpers};
 use dom::htmlcollection::HTMLCollection;
 use dom::htmlelement::HTMLElement;
 use dom::htmliframeelement::{HTMLIFrameElement, HTMLIFrameElementLayoutMethods};
@@ -62,7 +63,7 @@ use libc::{self, c_void, uintptr_t};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use msg::constellation_msg::{BrowsingContextId, PipelineId};
 use ref_slice::ref_slice;
-use script_layout_interface::{HTMLCanvasData, OpaqueStyleAndLayoutData, SVGSVGData};
+use script_layout_interface::{HTMLCanvasData, OpaqueStyleAndLayoutData, SVGSVGData, HTMLMediaData};
 use script_layout_interface::{LayoutElementType, LayoutNodeType, TrustedNodeAddress};
 use script_layout_interface::message::Msg;
 use script_thread::ScriptThread;
@@ -1026,6 +1027,7 @@ pub trait LayoutNodeHelpers {
     fn selection(&self) -> Option<Range<usize>>;
     fn image_url(&self) -> Option<ServoUrl>;
     fn canvas_data(&self) -> Option<HTMLCanvasData>;
+    fn media_data(&self) -> Option<HTMLMediaData>;
     fn svg_data(&self) -> Option<SVGSVGData>;
     fn iframe_browsing_context_id(&self) -> Option<BrowsingContextId>;
     fn iframe_pipeline_id(&self) -> Option<PipelineId>;
@@ -1176,6 +1178,11 @@ impl LayoutNodeHelpers for LayoutDom<Node> {
     fn svg_data(&self) -> Option<SVGSVGData> {
         self.downcast::<SVGSVGElement>()
             .map(|svg| svg.data())
+    }
+
+    fn media_data(&self) -> Option<HTMLMediaData> {
+        self.downcast::<HTMLMediaElement>()
+            .map(|media| media.data())
     }
 
     fn iframe_browsing_context_id(&self) -> Option<BrowsingContextId> {
@@ -2749,6 +2756,8 @@ impl Into<LayoutElementType> for ElementTypeId {
                 LayoutElementType::HTMLIFrameElement,
             ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLImageElement) =>
                 LayoutElementType::HTMLImageElement,
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLMediaElement(_)) =>
+                LayoutElementType::HTMLMediaElement,
             ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLInputElement) =>
                 LayoutElementType::HTMLInputElement,
             ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLObjectElement) =>

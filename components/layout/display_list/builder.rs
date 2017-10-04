@@ -1746,6 +1746,31 @@ impl FragmentDisplayListBuilding for Fragment {
                     })));
                 }
             },
+            SpecificFragmentInfo::Media(ref media_fragment_info) => {
+                if let Some((ref image_key, width, height)) = media_fragment_info.frame_source.get_current_frame() {
+                    let base = state.create_base_display_item(
+                        &stacking_relative_content_box,
+                        build_local_clip(&self.style),
+                        self.node,
+                        self.style.get_cursor(Cursor::Default),
+                        DisplayListSection::Content);
+                    let display_item = DisplayItem::Image(box ImageDisplayItem {
+                        base: base,
+                        webrender_image: WebRenderImageInfo {
+                            width: width as u32,
+                            height: height as u32,
+                            format: PixelFormat::BGRA8,
+                            key: Some(*image_key),
+                        },
+                        image_data: None,
+                        stretch_size: stacking_relative_content_box.size,
+                        tile_spacing: Size2D::zero(),
+                        image_rendering: image_rendering::T::auto,
+                    });
+
+                    state.add_display_item(display_item);
+                }
+            },
             SpecificFragmentInfo::Canvas(ref canvas_fragment_info) => {
                 let computed_width = canvas_fragment_info.dom_width.to_px();
                 let computed_height = canvas_fragment_info.dom_height.to_px();

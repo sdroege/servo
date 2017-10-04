@@ -113,6 +113,7 @@ pub enum LayoutElementType {
     HTMLIFrameElement,
     HTMLImageElement,
     HTMLInputElement,
+    HTMLMediaElement,
     HTMLObjectElement,
     HTMLParagraphElement,
     HTMLTableCellElement,
@@ -133,6 +134,17 @@ pub struct HTMLCanvasData {
     pub source: HTMLCanvasDataSource,
     pub width: u32,
     pub height: u32,
+}
+
+// TODO: Should probably be elsewhere
+pub trait HTMLMediaFrameSource: Send + Sync + 'static {
+    fn get_current_frame(&self) -> Option<(webrender_api::ImageKey, i32, i32)>;
+    // XXX
+    fn clone_boxed(&self) -> Box<HTMLMediaFrameSource>;
+}
+
+pub struct HTMLMediaData {
+    pub frame_source: Box<HTMLMediaFrameSource>,
 }
 
 pub struct SVGSVGData {
