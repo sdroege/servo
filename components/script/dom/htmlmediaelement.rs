@@ -150,6 +150,8 @@ pub struct WebrenderFrameRenderer {
 struct WebrenderFrameRendererInner{
     webrender_api: webrender_api::RenderApi,
     current_frame: Option<(webrender_api::ImageKey, i32, i32)>,
+    old_frame: Option<webrender_api::ImageKey>,
+    very_old_frame: Option<webrender_api::ImageKey>,
 }
 
 impl WebrenderFrameRenderer {
@@ -158,6 +160,8 @@ impl WebrenderFrameRenderer {
             inner: Arc::new(Mutex::new(WebrenderFrameRendererInner {
                 webrender_api: webrender_api_sender.create_api(),
                 current_frame: None,
+                old_frame: None,
+                very_old_frame: None,
             })),
         }
     }
@@ -188,9 +192,26 @@ impl WebrenderFrameRendererInner {
 
         let mut updates = webrender_api::ResourceUpdates::new();
 
+        if let Some(old_image_key) = mem::replace(&mut self.very_old_frame, self.old_frame.take()) {
+            updates.delete_image(old_image_key);
+        }
+
         match self.current_frame {
-            Some((ref image_key, ref mut width, ref mut height)) => {
+            Some((ref image_key, ref mut width, ref mut height)) if *width == frame.get_width() && *height == frame.get_height() => {
                 updates.update_image(*image_key, descriptor, data, None);
+                *width = frame.get_width();
+                *height = frame.get_height();
+
+                if let Some(old_image_key) = self.old_frame.take() {
+                    updates.delete_image(old_image_key);
+                }
+            },
+            Some((ref mut image_key, ref mut width, ref mut height)) => {
+                self.old_frame = Some(*image_key);
+
+                let new_image_key = self.webrender_api.generate_image_key();
+                updates.add_image(new_image_key, descriptor, data, None);
+                *image_key = new_image_key;
                 *width = frame.get_width();
                 *height = frame.get_height();
             },
@@ -217,6 +238,14 @@ impl Drop for WebrenderFrameRenderer {
         let mut updates = webrender_api::ResourceUpdates::new();
 
         if let Some((image_key, _, _)) = inner.current_frame.take() {
+            updates.delete_image(image_key);
+        }
+
+        if let Some(image_key) = inner.old_frame.take() {
+            updates.delete_image(image_key);
+        }
+
+        if let Some(image_key) = inner.very_old_frame.take() {
             updates.delete_image(image_key);
         }
 
