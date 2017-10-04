@@ -286,8 +286,8 @@ impl HTMLMediaElement {
         });
 
         let player = self.player.borrow();
-        player.start();
         player.register_event_handler(action_sender);
+        player.start();
     }
 
     fn handle_player_event(&self, event: &playground::player::PlayerEvent) {
