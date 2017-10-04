@@ -545,6 +545,8 @@ pub struct InitialScriptState {
     pub webvr_chan: Option<IpcSender<WebVRMsg>>,
     /// The Webrender document ID associated with this thread.
     pub webrender_document: DocumentId,
+    /// TODO
+    pub webrender_api_sender: webrender_api::RenderApiSender,
 }
 
 /// This trait allows creating a `ScriptThread` without depending on the `script`
