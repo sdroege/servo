@@ -125,6 +125,7 @@ use url::Position;
 use url::percent_encoding::percent_decode;
 use webdriver_handlers;
 use webvr_traits::{WebVREvent, WebVRMsg};
+use webrender_api;
 
 pub type ImageCacheMsg = (PipelineId, PendingImageResponse);
 
@@ -495,6 +496,9 @@ pub struct ScriptThread {
 
     /// https://html.spec.whatwg.org/multipage/#custom-element-reactions-stack
     custom_element_reaction_stack: CustomElementReactionStack,
+
+    /// TODO
+    webrender_api_sender: webrender_api::RenderApiSender,
 }
 
 /// In the event of thread panic, all data on the stack runs its destructor. However, there
@@ -871,6 +875,8 @@ impl ScriptThread {
             transitioning_nodes: Default::default(),
 
             custom_element_reaction_stack: CustomElementReactionStack::new(),
+
+            webrender_api_sender: state.webrender_api_sender,
         }
     }
 
@@ -2062,6 +2068,7 @@ impl ScriptThread {
             self.webgl_chan.channel(),
             self.webvr_chan.clone(),
             self.microtask_queue.clone(),
+            self.webrender_api_sender.clone(),
         );
 
         // Initialize the browsing context for the window.

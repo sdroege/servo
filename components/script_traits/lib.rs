@@ -554,7 +554,9 @@ pub struct InitialScriptState {
     /// A channel to the webgl thread used in this pipeline.
     pub webgl_chan: WebGLPipeline,
     /// A channel to the webvr thread, if available.
-    pub webvr_chan: Option<IpcSender<WebVRMsg>>
+    pub webvr_chan: Option<IpcSender<WebVRMsg>>,
+    /// TODO
+    pub webrender_api_sender: webrender_api::RenderApiSender,
 }
 
 /// This trait allows creating a `ScriptThread` without depending on the `script`
