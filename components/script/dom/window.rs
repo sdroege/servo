@@ -116,7 +116,7 @@ use timers::{IsInterval, TimerCallback};
 use tinyfiledialogs::{self, MessageBoxIcon};
 use url::Position;
 use webdriver_handlers::jsval_to_webdriver;
-use webrender_api::{self, ClipId, DocumentId, ExternalScrollId};
+use webrender_api::{self, DocumentId, ExternalScrollId};
 use webvr_traits::WebVRMsg;
 
 /// Current state of the window object
@@ -289,7 +289,7 @@ pub struct Window {
     /// Flag to identify whether mutation observers are present(true)/absent(false)
     exists_mut_observer: Cell<bool>,
 
-    #[ignore_heap_size_of = "trait objects are hard"]
+    #[ignore_malloc_size_of = "trait objects are hard"]
     webrender_api_sender: webrender_api::RenderApiSender,
 }
 
@@ -1776,7 +1776,7 @@ impl Window {
         webvr_chan: Option<IpcSender<WebVRMsg>>,
         microtask_queue: Rc<MicrotaskQueue>,
         webrender_document: DocumentId,
-        webrender_api_sender: webrender_api::RenderApiSender,
+        webrender_api_sender: webrender_api::RenderApiSender
     ) -> DomRoot<Self> {
         let layout_rpc: Box<LayoutRPC + Send> = {
             let (rpc_send, rpc_recv) = channel();
@@ -1854,7 +1854,7 @@ impl Window {
             webrender_document,
             exists_mut_observer: Cell::new(false),
             webrender_api_sender: webrender_api_sender,
-        };
+        });
 
         unsafe {
             WindowBinding::Wrap(runtime.cx(), win)

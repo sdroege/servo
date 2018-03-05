@@ -22,9 +22,8 @@ use floats::FloatKind;
 use flow::{AbsoluteDescendants, Flow, FlowClass, GetBaseFlow, ImmutableFlowUtils};
 use flow::{FlowFlags, MutableFlowUtils, MutableOwnedFlowUtils};
 use flow_ref::FlowRef;
-use fragment::{CanvasFragmentInfo, ImageFragmentInfo, InlineAbsoluteFragmentInfo, SvgFragmentInfo, MediaFragmentInfo};
-use fragment::{Fragment, GeneratedContentInfo, IframeFragmentInfo};
-use fragment::{IS_INLINE_FLEX_ITEM, IS_BLOCK_FLEX_ITEM};
+use fragment::{CanvasFragmentInfo, ImageFragmentInfo, InlineAbsoluteFragmentInfo, SvgFragmentInfo};
+use fragment::{Fragment, GeneratedContentInfo, IframeFragmentInfo, FragmentFlags, MediaFragmentInfo};
 use fragment::{InlineAbsoluteHypotheticalFragmentInfo, TableColumnFragmentInfo};
 use fragment::{InlineBlockFragmentInfo, SpecificFragmentInfo, UnscannedTextFragmentInfo};
 use fragment::WhitespaceStrippingResult;
@@ -410,7 +409,7 @@ impl<'a, ConcreteThreadSafeLayoutNode: ThreadSafeLayoutNode>
             }
             Some(LayoutNodeType::Element(LayoutElementType::HTMLMediaElement)) => {
                 let data = node.media_data().unwrap();
-                SpecificFragmentInfo::Media(box MediaFragmentInfo::new(data))
+                SpecificFragmentInfo::Media(Box::new(MediaFragmentInfo::new(data)))
             }
             _ => {
                 // This includes pseudo-elements.

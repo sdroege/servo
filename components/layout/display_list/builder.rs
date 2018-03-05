@@ -1752,9 +1752,9 @@ impl FragmentDisplayListBuilding for Fragment {
                         &stacking_relative_content_box,
                         build_local_clip(&self.style),
                         self.node,
-                        self.style.get_cursor(Cursor::Default),
+                        self.style.get_cursor(CursorKind::Default),
                         DisplayListSection::Content);
-                    let display_item = DisplayItem::Image(box ImageDisplayItem {
+                    let display_item = DisplayItem::Image(Box::new(ImageDisplayItem {
                         base: base,
                         webrender_image: WebRenderImageInfo {
                             width: width as u32,
@@ -1762,11 +1762,10 @@ impl FragmentDisplayListBuilding for Fragment {
                             format: PixelFormat::BGRA8,
                             key: Some(*image_key),
                         },
-                        image_data: None,
-                        stretch_size: stacking_relative_content_box.size,
-                        tile_spacing: Size2D::zero(),
-                        image_rendering: image_rendering::T::auto,
-                    });
+                        stretch_size: stacking_relative_content_box.size.to_layout(),
+                        tile_spacing: LayoutSize::zero(),
+                        image_rendering: ImageRendering::Auto,
+                    }));
 
                     state.add_display_item(display_item);
                 }

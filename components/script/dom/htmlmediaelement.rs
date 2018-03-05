@@ -104,9 +104,9 @@ pub struct HTMLMediaElement {
     video: DomRefCell<Option<VideoMedia>>,
     /// Whether the media metadata has been completely received.
     have_metadata: Cell<bool>,
-    #[ignore_heap_size_of = "oops"]
+    #[ignore_malloc_size_of = "oops"]
     player: RefCell<player::Player>,
-    #[ignore_heap_size_of = "oops"]
+    #[ignore_malloc_size_of = "oops"]
     frame_renderer: WebrenderFrameRenderer,
 }
 
@@ -131,10 +131,10 @@ enum ReadyState {
     HaveEnoughData = HTMLMediaElementConstants::HAVE_ENOUGH_DATA as u8,
 }
 
-#[derive(HeapSizeOf, JSTraceable, Debug)]
+#[derive(MallocSizeOf, JSTraceable, Debug)]
 pub struct VideoMedia {
     format: String,
-    #[ignore_heap_size_of = "defined in time"]
+    #[ignore_malloc_size_of = "defined in time"]
     duration: Duration,
     width: u32,
     height: u32,
@@ -394,7 +394,7 @@ impl HTMLMediaElement {
         let win = window_from_node(self);
         let task_source = win.dom_manipulation_task_source();
         let task_canceller = win.task_canceller();
-        ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
+        ROUTER.add_route(action_receiver.to_opaque(), Box::new(move |message| {
             let event: playground::player::PlayerEvent = message.to().unwrap();
             println!("Event received: {:?}", event);
             let element = trusted_node.clone();
@@ -404,7 +404,7 @@ impl HTMLMediaElement {
                 }),
                 &task_canceller,
             );
-        });
+        }));
 
         let player = self.player.borrow();
         player.register_event_handler(action_sender);
@@ -1361,11 +1361,11 @@ impl HTMLMediaElementContext {
         }
     }
 
-    fn check_metadata(&mut self, elem: &HTMLMediaElement) {
+    /*fn check_metadata(&mut self, elem: &HTMLMediaElement) {
         if audio_video_metadata::get_format_from_slice(&self.data).is_ok() {
             // Step 6.
             elem.change_ready_state(ReadyState::HaveMetadata);
             self.have_metadata = true;
         }
-    }
+    }*/
 }
