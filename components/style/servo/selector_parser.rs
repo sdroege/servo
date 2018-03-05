@@ -8,31 +8,28 @@
 
 use {Atom, Prefix, Namespace, LocalName, CaseSensitivityExt};
 use attr::{AttrIdentifier, AttrValue};
-use cssparser::{Parser as CssParser, ToCss, serialize_identifier, CowRcStr};
+use cssparser::{Parser as CssParser, ToCss, serialize_identifier, CowRcStr, SourceLocation};
 use dom::{OpaqueNode, TElement, TNode};
-use element_state::ElementState;
+use element_state::{DocumentState, ElementState};
 use fnv::FnvHashMap;
+use invalidation::element::document_state::InvalidationMatchingData;
 use invalidation::element::element_wrapper::ElementSnapshot;
-use properties::ComputedValues;
-use properties::PropertyFlags;
-use properties::longhands::display::computed_value as display;
-use selector_parser::{AttrValue as SelectorAttrValue, ElementExt, PseudoElementCascadeType, SelectorParser};
-use selectors::Element;
+use properties::{CascadeFlags, ComputedValues, PropertyFlags};
+use properties::longhands::display::computed_value::T as Display;
+use selector_parser::{AttrValue as SelectorAttrValue, PseudoElementCascadeType, SelectorParser};
 use selectors::attr::{AttrSelectorOperation, NamespaceConstraint, CaseSensitivity};
-use selectors::parser::{SelectorMethods, SelectorParseError};
+use selectors::parser::{Visit, SelectorParseErrorKind};
 use selectors::visitor::SelectorVisitor;
-use std::ascii::AsciiExt;
 use std::fmt;
-use std::fmt::Debug;
 use std::mem;
 use std::ops::{Deref, DerefMut};
-use style_traits::{ParseError, StyleParseError};
+use style_traits::{ParseError, StyleParseErrorKind};
 
 /// A pseudo-element, both public and private.
 ///
 /// NB: If you add to this list, be sure to update `each_simple_pseudo_element` too.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[cfg_attr(feature = "servo", derive(MallocSizeOf))]
 #[allow(missing_docs)]
 #[repr(usize)]
 pub enum PseudoElement {
@@ -64,9 +61,8 @@ pub enum PseudoElement {
     ServoInlineAbsolute,
 }
 
-/// The count of simple (non-functional) pseudo-elements (that is, all
-/// pseudo-elements for now).
-pub const SIMPLE_PSEUDO_COUNT: usize = PseudoElement::ServoInlineAbsolute as usize + 1;
+/// The count of all pseudo-elements.
+pub const PSEUDO_COUNT: usize = PseudoElement::ServoInlineAbsolute as usize + 1;
 
 impl ::selectors::parser::PseudoElement for PseudoElement {
     type Impl = SelectorImpl;
@@ -112,12 +108,12 @@ impl PseudoElement {
 
     /// An index for this pseudo-element to be indexed in an enumerated array.
     #[inline]
-    pub fn simple_index(&self) -> Option<usize> {
-        Some(self.clone() as usize)
+    pub fn index(&self) -> usize {
+        self.clone() as usize
     }
 
-    /// An array of `None`, one per simple pseudo-element.
-    pub fn simple_pseudo_none_array<T>() -> [Option<T>; SIMPLE_PSEUDO_COUNT] {
+    /// An array of `None`, one per pseudo-element.
+    pub fn pseudo_none_array<T>() -> [Option<T>; PSEUDO_COUNT] {
         Default::default()
     }
 
@@ -177,10 +173,10 @@ impl PseudoElement {
         self.is_precomputed()
     }
 
-    /// Whether this pseudo-element skips flex/grid container
-    /// display-based fixup.
+    /// Whether this pseudo-element skips flex/grid container display-based
+    /// fixup.
     #[inline]
-    pub fn skip_item_based_display_fixup(&self) -> bool {
+    pub fn skip_item_display_fixup(&self) -> bool {
         !self.is_before_or_after()
     }
 
@@ -216,6 +212,43 @@ impl PseudoElement {
         }
     }
 
+    /// For most (but not all) anon-boxes, we inherit all values from the
+    /// parent, this is the hook in the style system to allow this.
+    ///
+    /// FIXME(emilio): It's likely that this is broken in a variety of
+    /// situations, and what it really wants is just inherit some reset
+    /// properties...  Also, I guess it just could do all: inherit on the
+    /// stylesheet, though chances are that'd be kinda slow if we don't cache
+    /// them...
+    pub fn cascade_flags(&self) -> CascadeFlags {
+        match *self {
+            PseudoElement::After |
+            PseudoElement::Before |
+            PseudoElement::Selection |
+            PseudoElement::DetailsContent |
+            PseudoElement::DetailsSummary => CascadeFlags::empty(),
+            // Anonymous table flows shouldn't inherit their parents properties in order
+            // to avoid doubling up styles such as transformations.
+            PseudoElement::ServoAnonymousTableCell |
+            PseudoElement::ServoAnonymousTableRow |
+            PseudoElement::ServoText |
+            PseudoElement::ServoInputText => CascadeFlags::empty(),
+
+            // For tables, we do want style to inherit, because TableWrapper is
+            // responsible for handling clipping and scrolling, while Table is
+            // responsible for creating stacking contexts.
+            //
+            // StackingContextCollectionFlags makes sure this is processed
+            // properly.
+            PseudoElement::ServoAnonymousTable |
+            PseudoElement::ServoAnonymousTableWrapper |
+            PseudoElement::ServoTableWrapper |
+            PseudoElement::ServoAnonymousBlock |
+            PseudoElement::ServoInlineBlockWrapper |
+            PseudoElement::ServoInlineAbsolute => CascadeFlags::INHERIT_ALL,
+        }
+    }
+
     /// Covert non-canonical pseudo-element to canonical one, and keep a
     /// canonical one as it is.
     pub fn canonical(&self) -> PseudoElement {
@@ -233,10 +266,9 @@ impl PseudoElement {
 
     /// Whether this pseudo-element should actually exist if it has
     /// the given styles.
-    pub fn should_exist(&self, style: &ComputedValues) -> bool
-    {
+    pub fn should_exist(&self, style: &ComputedValues) -> bool {
         let display = style.get_box().clone_display();
-        if display == display::T::none {
+        if display == Display::None {
             return false;
         }
         if self.is_before_or_after() && style.ineffective_content_property() {
@@ -253,7 +285,7 @@ pub type PseudoClassStringArg = Box<str>;
 /// A non tree-structural pseudo-class.
 /// See https://drafts.csswg.org/selectors-4/#structural-pseudos
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[cfg_attr(feature = "servo", derive(MallocSizeOf))]
 #[allow(missing_docs)]
 pub enum NonTSPseudoClass {
     Active,
@@ -316,7 +348,7 @@ impl ToCss for NonTSPseudoClass {
     }
 }
 
-impl SelectorMethods for NonTSPseudoClass {
+impl Visit for NonTSPseudoClass {
     type Impl = SelectorImpl;
 
 
@@ -331,20 +363,20 @@ impl NonTSPseudoClass {
     /// Gets a given state flag for this pseudo-class. This is used to do
     /// selector matching, and it's set from the DOM.
     pub fn state_flag(&self) -> ElementState {
-        use element_state::*;
+        use element_state::ElementState;
         use self::NonTSPseudoClass::*;
         match *self {
-            Active => IN_ACTIVE_STATE,
-            Focus => IN_FOCUS_STATE,
-            Fullscreen => IN_FULLSCREEN_STATE,
-            Hover => IN_HOVER_STATE,
-            Enabled => IN_ENABLED_STATE,
-            Disabled => IN_DISABLED_STATE,
-            Checked => IN_CHECKED_STATE,
-            Indeterminate => IN_INDETERMINATE_STATE,
-            ReadOnly | ReadWrite => IN_READ_WRITE_STATE,
-            PlaceholderShown => IN_PLACEHOLDER_SHOWN_STATE,
-            Target => IN_TARGET_STATE,
+            Active => ElementState::IN_ACTIVE_STATE,
+            Focus => ElementState::IN_FOCUS_STATE,
+            Fullscreen => ElementState::IN_FULLSCREEN_STATE,
+            Hover => ElementState::IN_HOVER_STATE,
+            Enabled => ElementState::IN_ENABLED_STATE,
+            Disabled => ElementState::IN_DISABLED_STATE,
+            Checked => ElementState::IN_CHECKED_STATE,
+            Indeterminate => ElementState::IN_INDETERMINATE_STATE,
+            ReadOnly | ReadWrite => ElementState::IN_READ_WRITE_STATE,
+            PlaceholderShown => ElementState::IN_PLACEHOLDER_SHOWN_STATE,
+            Target => ElementState::IN_TARGET_STATE,
 
             AnyLink |
             Lang(_) |
@@ -353,6 +385,11 @@ impl NonTSPseudoClass {
             ServoNonZeroBorder |
             ServoCaseSensitiveTypeAttr(_) => ElementState::empty(),
         }
+    }
+
+    /// Get the document state flag associated with a pseudo-class, if any.
+    pub fn document_state_flag(&self) -> DocumentState {
+        DocumentState::empty()
     }
 
     /// Returns true if the given pseudoclass should trigger style sharing cache revalidation.
@@ -370,13 +407,14 @@ impl NonTSPseudoClass {
 /// The abstract struct we implement the selector parser implementation on top
 /// of.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[cfg_attr(feature = "servo", derive(MallocSizeOf))]
 pub struct SelectorImpl;
 
 impl ::selectors::SelectorImpl for SelectorImpl {
     type PseudoElement = PseudoElement;
     type NonTSPseudoClass = NonTSPseudoClass;
 
+    type ExtraMatchingData = InvalidationMatchingData;
     type AttrValue = String;
     type Identifier = Atom;
     type ClassName = Atom;
@@ -395,9 +433,9 @@ impl ::selectors::SelectorImpl for SelectorImpl {
 
 impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
     type Impl = SelectorImpl;
-    type Error = StyleParseError<'i>;
+    type Error = StyleParseErrorKind<'i>;
 
-    fn parse_non_ts_pseudo_class(&self, name: CowRcStr<'i>)
+    fn parse_non_ts_pseudo_class(&self, location: SourceLocation, name: CowRcStr<'i>)
                                  -> Result<NonTSPseudoClass, ParseError<'i>> {
         use self::NonTSPseudoClass::*;
         let pseudo_class = match_ignore_ascii_case! { &name,
@@ -418,12 +456,13 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
             "visited" => Visited,
             "-servo-nonzero-border" => {
                 if !self.in_user_agent_stylesheet() {
-                    return Err(SelectorParseError::UnexpectedIdent(
-                        "-servo-nonzero-border".into()).into());
+                    return Err(location.new_custom_error(
+                        SelectorParseErrorKind::UnexpectedIdent("-servo-nonzero-border".into())
+                    ))
                 }
                 ServoNonZeroBorder
             },
-            _ => return Err(SelectorParseError::UnexpectedIdent(name.clone()).into()),
+            _ => return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone()))),
         };
 
         Ok(pseudo_class)
@@ -440,17 +479,18 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
             }
             "-servo-case-sensitive-type-attr" => {
                 if !self.in_user_agent_stylesheet() {
-                    return Err(SelectorParseError::UnexpectedIdent(name.clone()).into());
+                    return Err(parser.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())));
                 }
                 ServoCaseSensitiveTypeAttr(Atom::from(parser.expect_ident()?.as_ref()))
             }
-            _ => return Err(SelectorParseError::UnexpectedIdent(name.clone()).into())
+            _ => return Err(parser.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
         };
 
         Ok(pseudo_class)
     }
 
-    fn parse_pseudo_element(&self, name: CowRcStr<'i>) -> Result<PseudoElement, ParseError<'i>> {
+    fn parse_pseudo_element(&self, location: SourceLocation, name: CowRcStr<'i>)
+                             -> Result<PseudoElement, ParseError<'i>> {
         use self::PseudoElement::*;
         let pseudo_element = match_ignore_ascii_case! { &name,
             "before" => Before,
@@ -458,77 +498,77 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
             "selection" => Selection,
             "-servo-details-summary" => {
                 if !self.in_user_agent_stylesheet() {
-                    return Err(SelectorParseError::UnexpectedIdent(name.clone()).into())
+                    return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
                 }
                 DetailsSummary
             },
             "-servo-details-content" => {
                 if !self.in_user_agent_stylesheet() {
-                    return Err(SelectorParseError::UnexpectedIdent(name.clone()).into())
+                    return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
                 }
                 DetailsContent
             },
             "-servo-text" => {
                 if !self.in_user_agent_stylesheet() {
-                    return Err(SelectorParseError::UnexpectedIdent(name.clone()).into())
+                    return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
                 }
                 ServoText
             },
             "-servo-input-text" => {
                 if !self.in_user_agent_stylesheet() {
-                    return Err(SelectorParseError::UnexpectedIdent(name.clone()).into())
+                    return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
                 }
                 ServoInputText
             },
             "-servo-table-wrapper" => {
                 if !self.in_user_agent_stylesheet() {
-                    return Err(SelectorParseError::UnexpectedIdent(name.clone()).into())
+                    return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
                 }
                 ServoTableWrapper
             },
             "-servo-anonymous-table-wrapper" => {
                 if !self.in_user_agent_stylesheet() {
-                    return Err(SelectorParseError::UnexpectedIdent(name.clone()).into())
+                    return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
                 }
                 ServoAnonymousTableWrapper
             },
             "-servo-anonymous-table" => {
                 if !self.in_user_agent_stylesheet() {
-                    return Err(SelectorParseError::UnexpectedIdent(name.clone()).into())
+                    return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
                 }
                 ServoAnonymousTable
             },
             "-servo-anonymous-table-row" => {
                 if !self.in_user_agent_stylesheet() {
-                    return Err(SelectorParseError::UnexpectedIdent(name.clone()).into())
+                    return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
                 }
                 ServoAnonymousTableRow
             },
             "-servo-anonymous-table-cell" => {
                 if !self.in_user_agent_stylesheet() {
-                    return Err(SelectorParseError::UnexpectedIdent(name.clone()).into())
+                    return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
                 }
                 ServoAnonymousTableCell
             },
             "-servo-anonymous-block" => {
                 if !self.in_user_agent_stylesheet() {
-                    return Err(SelectorParseError::UnexpectedIdent(name.clone()).into())
+                    return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
                 }
                 ServoAnonymousBlock
             },
             "-servo-inline-block-wrapper" => {
                 if !self.in_user_agent_stylesheet() {
-                    return Err(SelectorParseError::UnexpectedIdent(name.clone()).into())
+                    return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
                 }
                 ServoInlineBlockWrapper
             },
             "-servo-input-absolute" => {
                 if !self.in_user_agent_stylesheet() {
-                    return Err(SelectorParseError::UnexpectedIdent(name.clone()).into())
+                    return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
                 }
                 ServoInlineAbsolute
             },
-            _ => return Err(SelectorParseError::UnexpectedIdent(name.clone()).into())
+            _ => return Err(location.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone())))
 
         };
 
@@ -545,12 +585,6 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
 }
 
 impl SelectorImpl {
-    /// Returns the pseudo-element cascade type of the given `pseudo`.
-    #[inline]
-    pub fn pseudo_element_cascade_type(pseudo: &PseudoElement) -> PseudoElementCascadeType {
-        pseudo.cascade_type()
-    }
-
     /// A helper to traverse each eagerly cascaded pseudo-element, executing
     /// `fun` on it.
     #[inline]
@@ -560,12 +594,6 @@ impl SelectorImpl {
         for i in 0..EAGER_PSEUDO_COUNT {
             fun(PseudoElement::from_eager_index(i));
         }
-    }
-
-    /// Returns the pseudo-class state flag for selector matching.
-    #[inline]
-    pub fn pseudo_class_state_flag(pc: &NonTSPseudoClass) -> ElementState {
-        pc.state_flag()
     }
 }
 
@@ -601,7 +629,7 @@ impl DerefMut for SnapshotMap {
 
 /// Servo's version of an element snapshot.
 #[derive(Debug)]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[cfg_attr(feature = "servo", derive(MallocSizeOf))]
 pub struct ServoElementSnapshot {
     /// The stored state of the element.
     pub state: Option<ElementState>,
@@ -668,8 +696,8 @@ impl ElementSnapshot for ServoElementSnapshot {
         self.attrs.is_some()
     }
 
-    fn id_attr(&self) -> Option<Atom> {
-        self.get_attr(&ns!(), &local_name!("id")).map(|v| v.as_atom().clone())
+    fn id_attr(&self) -> Option<&Atom> {
+        self.get_attr(&ns!(), &local_name!("id")).map(|v| v.as_atom())
     }
 
     fn has_class(&self, name: &Atom, case_sensitivity: CaseSensitivity) -> bool {
@@ -710,13 +738,6 @@ impl ServoElementSnapshot {
                 self.any_attr_ignore_ns(local_name, |value| value.eval_selector(operation))
             }
         }
-    }
-}
-
-impl<E: Element<Impl=SelectorImpl> + Debug> ElementExt for E {
-    #[inline]
-    fn matches_user_and_author_rules(&self) -> bool {
-        true
     }
 }
 

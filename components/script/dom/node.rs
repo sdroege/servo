@@ -37,6 +37,7 @@ use dom::eventtarget::EventTarget;
 use dom::globalscope::GlobalScope;
 use dom::htmlbodyelement::HTMLBodyElement;
 use dom::htmlcanvaselement::{HTMLCanvasElement, LayoutHTMLCanvasElementHelpers};
+use dom::htmlmediaelement::{HTMLMediaElement, LayoutHTMLMediaElementHelpers};
 use dom::htmlcollection::HTMLCollection;
 use dom::htmlelement::HTMLElement;
 use dom::htmliframeelement::{HTMLIFrameElement, HTMLIFrameElementLayoutMethods};
@@ -56,13 +57,13 @@ use dom::virtualmethods::{VirtualMethods, vtable_for};
 use dom::window::Window;
 use dom_struct::dom_struct;
 use euclid::{Point2D, Vector2D, Rect, Size2D};
-use heapsize::{HeapSizeOf, heap_size_of};
 use html5ever::{Prefix, Namespace, QualName};
 use js::jsapi::{JSContext, JSObject, JSRuntime};
 use libc::{self, c_void, uintptr_t};
+use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use msg::constellation_msg::{BrowsingContextId, PipelineId};
 use ref_slice::ref_slice;
-use script_layout_interface::{HTMLCanvasData, OpaqueStyleAndLayoutData, SVGSVGData};
+use script_layout_interface::{HTMLCanvasData, OpaqueStyleAndLayoutData, SVGSVGData, HTMLMediaData};
 use script_layout_interface::{LayoutElementType, LayoutNodeType, TrustedNodeAddress};
 use script_layout_interface::message::Msg;
 use script_thread::ScriptThread;
@@ -147,40 +148,37 @@ pub struct Node {
 
 bitflags! {
     #[doc = "Flags for node items."]
-    #[derive(HeapSizeOf, JSTraceable)]
-    pub flags NodeFlags: u16 {
+    #[derive(JSTraceable, MallocSizeOf)]
+    pub struct NodeFlags: u16 {
         #[doc = "Specifies whether this node is in a document."]
-        const IS_IN_DOC = 1 << 0,
+        const IS_IN_DOC = 1 << 0;
 
         #[doc = "Specifies whether this node needs style recalc on next reflow."]
-        const HAS_DIRTY_DESCENDANTS = 1 << 1,
+        const HAS_DIRTY_DESCENDANTS = 1 << 1;
         // TODO: find a better place to keep this (#4105)
         // https://critic.hoppipolla.co.uk/showcomment?chain=8873
         // Perhaps using a Set in Document?
         #[doc = "Specifies whether or not there is an authentic click in progress on \
                  this element."]
-        const CLICK_IN_PROGRESS = 1 << 2,
+        const CLICK_IN_PROGRESS = 1 << 2;
         #[doc = "Specifies whether this node is focusable and whether it is supposed \
                  to be reachable with using sequential focus navigation."]
-        const SEQUENTIALLY_FOCUSABLE = 1 << 3,
+        const SEQUENTIALLY_FOCUSABLE = 1 << 3;
 
-        /// Whether any ancestor is a fragmentation container
-        const CAN_BE_FRAGMENTED = 1 << 4,
-
-        // There's a free bit here.
+        // There are two free bits here.
 
         #[doc = "Specifies whether the parser has set an associated form owner for \
                  this element. Only applicable for form-associatable elements."]
-        const PARSER_ASSOCIATED_FORM_OWNER = 1 << 6,
+        const PARSER_ASSOCIATED_FORM_OWNER = 1 << 6;
 
         /// Whether this element has a snapshot stored due to a style or
         /// attribute change.
         ///
         /// See the `style::restyle_hints` module.
-        const HAS_SNAPSHOT = 1 << 7,
+        const HAS_SNAPSHOT = 1 << 7;
 
         /// Whether this element has already handled the stored snapshot.
-        const HANDLED_SNAPSHOT = 1 << 8,
+        const HANDLED_SNAPSHOT = 1 << 8;
     }
 }
 
@@ -198,9 +196,9 @@ impl Drop for Node {
 }
 
 /// suppress observers flag
-/// https://dom.spec.whatwg.org/#concept-node-insert
-/// https://dom.spec.whatwg.org/#concept-node-remove
-#[derive(Clone, Copy, HeapSizeOf)]
+/// <https://dom.spec.whatwg.org/#concept-node-insert>
+/// <https://dom.spec.whatwg.org/#concept-node-remove>
+#[derive(Clone, Copy, MallocSizeOf)]
 enum SuppressObserver {
     Suppressed,
     Unsuppressed
@@ -261,13 +259,11 @@ impl Node {
 
         let parent_in_doc = self.is_in_doc();
         for node in new_child.traverse_preorder() {
-            node.set_flag(IS_IN_DOC, parent_in_doc);
+            node.set_flag(NodeFlags::IS_IN_DOC, parent_in_doc);
             // Out-of-document elements never have the descendants flag set.
-            debug_assert!(!node.get_flag(HAS_DIRTY_DESCENDANTS));
+            debug_assert!(!node.get_flag(NodeFlags::HAS_DIRTY_DESCENDANTS));
             vtable_for(&&*node).bind_to_tree(parent_in_doc);
         }
-        let document = new_child.owner_doc();
-        document.content_and_heritage_changed(new_child, NodeDamage::OtherNodeDamage);
     }
 
     /// Removes the given child from this node's list of children.
@@ -303,8 +299,8 @@ impl Node {
 
         for node in child.traverse_preorder() {
             // Out-of-document elements never have the descendants flag set.
-            node.set_flag(IS_IN_DOC | HAS_DIRTY_DESCENDANTS |
-                          HAS_SNAPSHOT | HANDLED_SNAPSHOT,
+            node.set_flag(NodeFlags::IS_IN_DOC | NodeFlags::HAS_DIRTY_DESCENDANTS |
+                          NodeFlags::HAS_SNAPSHOT | NodeFlags::HANDLED_SNAPSHOT,
                           false);
         }
         for node in child.traverse_preorder() {
@@ -318,9 +314,6 @@ impl Node {
                 ScriptThread::enqueue_callback_reaction(&*element, CallbackReaction::Disconnected, None);
             }
         }
-
-        self.owner_doc().content_and_heritage_changed(self, NodeDamage::OtherNodeDamage);
-        child.owner_doc().content_and_heritage_changed(child, NodeDamage::OtherNodeDamage);
     }
 
     pub fn to_untrusted_node_address(&self) -> UntrustedNodeAddress {
@@ -427,7 +420,7 @@ impl Node {
     }
 
     pub fn is_in_doc(&self) -> bool {
-        self.flags.get().contains(IS_IN_DOC)
+        self.flags.get().contains(NodeFlags::IS_IN_DOC)
     }
 
     /// Returns the type ID of this node.
@@ -488,8 +481,21 @@ impl Node {
         self.flags.set(flags);
     }
 
+    // FIXME(emilio): This and the function below should move to Element.
+    pub fn note_dirty_descendants(&self) {
+        debug_assert!(self.is_in_doc());
+
+        for ancestor in self.inclusive_ancestors() {
+            if ancestor.get_flag(NodeFlags::HAS_DIRTY_DESCENDANTS) {
+                return;
+            }
+
+            ancestor.set_flag(NodeFlags::HAS_DIRTY_DESCENDANTS, true);
+        }
+    }
+
     pub fn has_dirty_descendants(&self) -> bool {
-        self.get_flag(HAS_DIRTY_DESCENDANTS)
+        self.get_flag(NodeFlags::HAS_DIRTY_DESCENDANTS)
     }
 
     pub fn rev_version(&self) {
@@ -764,7 +770,7 @@ impl Node {
         }
     }
 
-    /// https://dom.spec.whatwg.org/#scope-match-a-selectors-string
+    /// <https://dom.spec.whatwg.org/#scope-match-a-selectors-string>
     /// Get an iterator over all nodes which match a set of selectors
     /// Be careful not to do anything which may manipulate the DOM tree
     /// whilst iterating, otherwise the iterator may be invalidated.
@@ -1021,6 +1027,7 @@ pub trait LayoutNodeHelpers {
     fn selection(&self) -> Option<Range<usize>>;
     fn image_url(&self) -> Option<ServoUrl>;
     fn canvas_data(&self) -> Option<HTMLCanvasData>;
+    fn media_data(&self) -> Option<HTMLMediaData>;
     fn svg_data(&self) -> Option<SVGSVGData>;
     fn iframe_browsing_context_id(&self) -> Option<BrowsingContextId>;
     fn iframe_pipeline_id(&self) -> Option<PipelineId>;
@@ -1135,7 +1142,7 @@ impl LayoutNodeHelpers for LayoutDom<Node> {
         }
 
         if let Some(area) = self.downcast::<HTMLTextAreaElement>() {
-            return unsafe { area.get_value_for_layout() };
+            return unsafe { area.value_for_layout() };
         }
 
         panic!("not text!")
@@ -1173,6 +1180,11 @@ impl LayoutNodeHelpers for LayoutDom<Node> {
             .map(|svg| svg.data())
     }
 
+    fn media_data(&self) -> Option<HTMLMediaData> {
+        self.downcast::<HTMLMediaElement>()
+            .map(|media| media.data())
+    }
+
     fn iframe_browsing_context_id(&self) -> Option<BrowsingContextId> {
         let iframe_element = self.downcast::<HTMLIFrameElement>()
             .expect("not an iframe element!");
@@ -1206,11 +1218,7 @@ pub struct FollowingNodeIterator {
 impl FollowingNodeIterator {
     /// Skips iterating the children of the current node
     pub fn next_skipping_children(&mut self) -> Option<DomRoot<Node>> {
-        let current = match self.current.take() {
-            None => return None,
-            Some(current) => current,
-        };
-
+        let current = self.current.take()?;
         self.next_skipping_children_impl(current)
     }
 
@@ -1244,10 +1252,7 @@ impl Iterator for FollowingNodeIterator {
 
     // https://dom.spec.whatwg.org/#concept-tree-following
     fn next(&mut self) -> Option<DomRoot<Node>> {
-        let current = match self.current.take() {
-            None => return None,
-            Some(current) => current,
-        };
+        let current = self.current.take()?;
 
         if let Some(first_child) = current.GetFirstChild() {
             self.current = Some(first_child);
@@ -1268,10 +1273,7 @@ impl Iterator for PrecedingNodeIterator {
 
     // https://dom.spec.whatwg.org/#concept-tree-preceding
     fn next(&mut self) -> Option<DomRoot<Node>> {
-        let current = match self.current.take() {
-            None => return None,
-            Some(current) => current,
-        };
+        let current = self.current.take()?;
 
         self.current = if self.root == current {
             None
@@ -1323,10 +1325,7 @@ impl TreeIterator {
     }
 
     pub fn next_skipping_children(&mut self) -> Option<DomRoot<Node>> {
-        let current = match self.current.take() {
-            None => return None,
-            Some(current) => current,
-        };
+        let current = self.current.take()?;
 
         self.next_skipping_children_impl(current)
     }
@@ -1342,7 +1341,7 @@ impl TreeIterator {
             }
             self.depth -= 1;
         }
-        debug_assert!(self.depth == 0);
+        debug_assert_eq!(self.depth, 0);
         self.current = None;
         Some(current)
     }
@@ -1353,10 +1352,7 @@ impl Iterator for TreeIterator {
 
     // https://dom.spec.whatwg.org/#concept-tree-order
     fn next(&mut self) -> Option<DomRoot<Node>> {
-        let current = match self.current.take() {
-            None => return None,
-            Some(current) => current,
-        };
+        let current = self.current.take()?;
         if let Some(first_child) = current.GetFirstChild() {
             self.current = Some(first_child);
             self.depth += 1;
@@ -1368,7 +1364,7 @@ impl Iterator for TreeIterator {
 }
 
 /// Specifies whether children must be recursively cloned or not.
-#[derive(Clone, Copy, HeapSizeOf, PartialEq)]
+#[derive(Clone, Copy, MallocSizeOf, PartialEq)]
 pub enum CloneChildrenFlag {
     CloneChildren,
     DoNotCloneChildren
@@ -1394,7 +1390,7 @@ impl Node {
 
     #[allow(unrooted_must_root)]
     pub fn new_document_node() -> Node {
-        Node::new_(NodeFlags::new() | IS_IN_DOC, None)
+        Node::new_(NodeFlags::new() | NodeFlags::IS_IN_DOC, None)
     }
 
     #[allow(unrooted_must_root)]
@@ -1822,7 +1818,7 @@ impl Node {
                                              is_html_doc, None,
                                              None, DocumentActivity::Inactive,
                                              DocumentSource::NotFromParser, loader,
-                                             None, None);
+                                             None, None, Default::default());
                 DomRoot::upcast::<Node>(document)
             },
             NodeTypeId::Element(..) => {
@@ -1887,7 +1883,7 @@ impl Node {
         copy
     }
 
-    /// https://html.spec.whatwg.org/multipage/#child-text-content
+    /// <https://html.spec.whatwg.org/multipage/#child-text-content>
     pub fn child_text_content(&self) -> DOMString {
         Node::collect_text_contents(self.children())
     }
@@ -2520,6 +2516,7 @@ impl VirtualMethods for Node {
         if let Some(list) = self.child_list.get() {
             list.as_children_list().children_changed(mutation);
         }
+        self.owner_doc().content_and_heritage_changed(self);
     }
 
     // This handles the ranges mentioned in steps 2-3 when removing a node.
@@ -2531,7 +2528,7 @@ impl VirtualMethods for Node {
 }
 
 /// A summary of the changes that happened to a node.
-#[derive(Clone, Copy, HeapSizeOf, PartialEq)]
+#[derive(Clone, Copy, MallocSizeOf, PartialEq)]
 pub enum NodeDamage {
     /// The node's `style` attribute changed.
     NodeStyleDamaged,
@@ -2704,11 +2701,11 @@ struct UniqueId {
 
 unsafe_no_jsmanaged_fields!(UniqueId);
 
-impl HeapSizeOf for UniqueId {
+impl MallocSizeOf for UniqueId {
     #[allow(unsafe_code)]
-    fn heap_size_of_children(&self) -> usize {
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
         if let &Some(ref uuid) = unsafe { &*self.cell.get() } {
-            unsafe { heap_size_of(&** uuid as *const Uuid as *const _) }
+            unsafe { ops.malloc_size_of(&** uuid) }
         } else {
             0
         }
@@ -2727,7 +2724,7 @@ impl UniqueId {
         unsafe {
             let ptr = self.cell.get();
             if (*ptr).is_none() {
-                *ptr = Some(box Uuid::new_v4());
+                *ptr = Some(Box::new(Uuid::new_v4()));
             }
             &(&*ptr).as_ref().unwrap()
         }
@@ -2751,16 +2748,22 @@ impl Into<LayoutElementType> for ElementTypeId {
     #[inline(always)]
     fn into(self) -> LayoutElementType {
         match self {
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLBRElement) =>
+                LayoutElementType::HTMLBRElement,
             ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLCanvasElement) =>
                 LayoutElementType::HTMLCanvasElement,
             ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLIFrameElement) =>
                 LayoutElementType::HTMLIFrameElement,
             ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLImageElement) =>
                 LayoutElementType::HTMLImageElement,
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLMediaElement(_)) =>
+                LayoutElementType::HTMLMediaElement,
             ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLInputElement) =>
                 LayoutElementType::HTMLInputElement,
             ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLObjectElement) =>
                 LayoutElementType::HTMLObjectElement,
+            ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLParagraphElement) =>
+                LayoutElementType::HTMLParagraphElement,
             ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTableCellElement(_)) =>
                 LayoutElementType::HTMLTableCellElement,
             ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTableColElement) =>

@@ -10,7 +10,6 @@ use dom::document::Document;
 use dom::element::{CustomElementCreationMode, CustomElementState, Element, ElementCreator};
 use dom::globalscope::GlobalScope;
 use dom::htmlanchorelement::HTMLAnchorElement;
-use dom::htmlappletelement::HTMLAppletElement;
 use dom::htmlareaelement::HTMLAreaElement;
 use dom::htmlaudioelement::HTMLAudioElement;
 use dom::htmlbaseelement::HTMLBaseElement;
@@ -55,6 +54,7 @@ use dom::htmloptionelement::HTMLOptionElement;
 use dom::htmloutputelement::HTMLOutputElement;
 use dom::htmlparagraphelement::HTMLParagraphElement;
 use dom::htmlparamelement::HTMLParamElement;
+use dom::htmlpictureelement::HTMLPictureElement;
 use dom::htmlpreelement::HTMLPreElement;
 use dom::htmlprogresselement::HTMLProgressElement;
 use dom::htmlquoteelement::HTMLQuoteElement;
@@ -88,7 +88,7 @@ fn create_svg_element(name: QualName,
                       prefix: Option<Prefix>,
                       document: &Document)
                       -> DomRoot<Element> {
-    assert!(name.ns == ns!(svg));
+    assert_eq!(name.ns, ns!(svg));
 
     macro_rules! make(
         ($ctor:ident) => ({
@@ -120,7 +120,7 @@ fn create_html_element(name: QualName,
                        creator: ElementCreator,
                        mode: CustomElementCreationMode)
                        -> DomRoot<Element> {
-    assert!(name.ns == ns!(html));
+    assert_eq!(name.ns, ns!(html));
 
     // Step 4
     let definition = document.lookup_custom_element_definition(&name.ns, &name.local, is.as_ref());
@@ -191,12 +191,13 @@ fn create_html_element(name: QualName,
     result
 }
 
-pub fn create_native_html_element(name: QualName,
-                                  prefix: Option<Prefix>,
-                                  document: &Document,
-                                  creator: ElementCreator)
-                                  -> DomRoot<Element> {
-    assert!(name.ns == ns!(html));
+pub fn create_native_html_element(
+    name: QualName,
+    prefix: Option<Prefix>,
+    document: &Document,
+    creator: ElementCreator,
+) -> DomRoot<Element> {
+    assert_eq!(name.ns, ns!(html));
 
     macro_rules! make(
         ($ctor:ident) => ({
@@ -217,7 +218,6 @@ pub fn create_native_html_element(name: QualName,
         local_name!("abbr")       => make!(HTMLElement),
         local_name!("acronym")    => make!(HTMLElement),
         local_name!("address")    => make!(HTMLElement),
-        local_name!("applet")     => make!(HTMLAppletElement),
         local_name!("area")       => make!(HTMLAreaElement),
         local_name!("article")    => make!(HTMLElement),
         local_name!("aside")      => make!(HTMLElement),
@@ -310,6 +310,7 @@ pub fn create_native_html_element(name: QualName,
         local_name!("output")     => make!(HTMLOutputElement),
         local_name!("p")          => make!(HTMLParagraphElement),
         local_name!("param")      => make!(HTMLParamElement),
+        local_name!("picture")    => make!(HTMLPictureElement),
         local_name!("plaintext")  => make!(HTMLPreElement),
         local_name!("pre")        => make!(HTMLPreElement),
         local_name!("progress")   => make!(HTMLProgressElement),

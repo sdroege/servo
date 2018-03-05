@@ -499,7 +499,7 @@ fn robin_hood<'a, K: 'a, V: 'a>(bucket: FullBucketMut<'a, K, V>,
         loop {
             displacement += 1;
             let probe = bucket.next();
-            debug_assert!(probe.index() != idx_end);
+            debug_assert_ne!(probe.index(), idx_end);
 
             let full_bucket = match probe.peek() {
                 Empty(bucket) => {
@@ -578,44 +578,8 @@ impl<K, V, S> HashMap<K, V, S>
                 Full(b) => b.into_bucket(),
             };
             buckets.next();
-            debug_assert!(buckets.index() != start_index);
+            debug_assert_ne!(buckets.index(), start_index);
         }
-    }
-}
-
-impl<K: Hash + Eq, V> HashMap<K, V, RandomState> {
-    /// Creates an empty `HashMap`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::HashMap;
-    /// let mut map: HashMap<&str, isize> = HashMap::new();
-    /// ```
-    #[inline]
-    pub fn new() -> HashMap<K, V, RandomState> {
-        Default::default()
-    }
-
-    /// Creates an empty `HashMap` with the specified capacity.
-    ///
-    /// The hash map will be able to hold at least `capacity` elements without
-    /// reallocating. If `capacity` is 0, the hash map will not allocate.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::HashMap;
-    /// let mut map: HashMap<&str, isize> = HashMap::with_capacity(10);
-    /// ```
-    #[inline]
-    pub fn with_capacity(capacity: usize) -> HashMap<K, V, RandomState> {
-        HashMap::with_capacity_and_hasher(capacity, Default::default())
-    }
-
-    #[inline]
-    pub fn try_with_capacity(capacity: usize) -> Result<HashMap<K, V, RandomState>, FailedAllocationError> {
-        HashMap::try_with_capacity_and_hasher(capacity, Default::default())
     }
 }
 
@@ -1025,12 +989,6 @@ impl<K, V, S> HashMap<K, V, S>
     /// ```
     pub fn len(&self) -> usize {
         self.table.size()
-    }
-
-    /// Access to the raw buffer backing this hashmap.
-    pub fn raw_buffer(&self) -> (*const (), usize) {
-        assert!(self.raw_capacity() != 0);
-        self.table.raw_buffer()
     }
 
     /// Returns true if the map contains no elements.
@@ -2687,7 +2645,7 @@ mod test_map {
         m2.insert(1, 2);
         m2.insert(2, 3);
 
-        assert!(m1 != m2);
+        assert_ne!(m1, m2);
 
         m2.insert(3, 4);
 

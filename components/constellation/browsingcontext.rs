@@ -109,7 +109,7 @@ impl BrowsingContext {
 /// When we operate on the joint session history, entries are sorted chronologically,
 /// so we timestamp the entries by when the entry was added to the session history.
 ///
-/// https://html.spec.whatwg.org/multipage/#session-history-entry
+/// <https://html.spec.whatwg.org/multipage/#session-history-entry>
 #[derive(Clone)]
 pub struct SessionHistoryEntry {
     /// The timestamp for when the session history entry was created
@@ -167,10 +167,7 @@ impl<'a> Iterator for FullyActiveBrowsingContextsIterator<'a> {
     type Item = &'a BrowsingContext;
     fn next(&mut self) -> Option<&'a BrowsingContext> {
         loop {
-            let browsing_context_id = match self.stack.pop() {
-                Some(browsing_context_id) => browsing_context_id,
-                None => return None,
-            };
+            let browsing_context_id = self.stack.pop()?;
             let browsing_context = match self.browsing_contexts.get(&browsing_context_id) {
                 Some(browsing_context) => browsing_context,
                 None => {
@@ -212,10 +209,7 @@ impl<'a> Iterator for AllBrowsingContextsIterator<'a> {
     fn next(&mut self) -> Option<&'a BrowsingContext> {
         let pipelines = self.pipelines;
         loop {
-            let browsing_context_id = match self.stack.pop() {
-                Some(browsing_context_id) => browsing_context_id,
-                None => return None,
-            };
+            let browsing_context_id = self.stack.pop()?;
             let browsing_context = match self.browsing_contexts.get(&browsing_context_id) {
                 Some(browsing_context) => browsing_context,
                 None => {

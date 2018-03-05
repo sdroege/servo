@@ -11,18 +11,12 @@
 use app_units::Au;
 use euclid::{Point2D, Size2D};
 use smallvec::SmallVec;
-use std::cmp::max;
 use values::computed::Angle as ComputedAngle;
 use values::computed::BorderCornerRadius as ComputedBorderCornerRadius;
 #[cfg(feature = "servo")]
 use values::computed::ComputedUrl;
-use values::computed::GreaterThanOrEqualToOneNumber as ComputedGreaterThanOrEqualToOneNumber;
 use values::computed::MaxLength as ComputedMaxLength;
 use values::computed::MozLength as ComputedMozLength;
-use values::computed::NonNegativeLength as ComputedNonNegativeLength;
-use values::computed::NonNegativeLengthOrPercentage as ComputedNonNegativeLengthOrPercentage;
-use values::computed::NonNegativeNumber as ComputedNonNegativeNumber;
-use values::computed::PositiveInteger as ComputedPositiveInteger;
 use values::specified::url::SpecifiedUrl;
 
 pub mod color;
@@ -48,15 +42,15 @@ pub trait Animate: Sized {
 
 /// An animation procedure.
 ///
-/// https://w3c.github.io/web-animations/#procedures-for-animating-properties
+/// <https://drafts.csswg.org/web-animations/#procedures-for-animating-properties>
 #[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Procedure {
-    /// https://w3c.github.io/web-animations/#animation-interpolation
+    /// <https://drafts.csswg.org/web-animations/#animation-interpolation>
     Interpolate { progress: f64 },
-    /// https://w3c.github.io/web-animations/#animation-addition
+    /// <https://drafts.csswg.org/web-animations/#animation-addition>
     Add,
-    /// https://w3c.github.io/web-animations/#animation-accumulation
+    /// <https://drafts.csswg.org/web-animations/#animation-accumulation>
     Accumulate { count: u64 },
 }
 
@@ -75,9 +69,6 @@ pub trait ToAnimatedValue {
     /// Converts back an animated value into a computed value.
     fn from_animated_value(animated: Self::AnimatedValue) -> Self;
 }
-
-/// Marker trait for computed values with the same representation during animations.
-pub trait AnimatedValueAsComputed {}
 
 /// Returns a value similar to `self` that represents zero.
 ///
@@ -113,7 +104,7 @@ impl Procedure {
     }
 }
 
-/// https://drafts.csswg.org/css-transitions/#animtype-number
+/// <https://drafts.csswg.org/css-transitions/#animtype-number>
 impl Animate for i32 {
     #[inline]
     fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
@@ -121,7 +112,7 @@ impl Animate for i32 {
     }
 }
 
-/// https://drafts.csswg.org/css-transitions/#animtype-number
+/// <https://drafts.csswg.org/css-transitions/#animtype-number>
 impl Animate for f32 {
     #[inline]
     fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
@@ -132,7 +123,7 @@ impl Animate for f32 {
     }
 }
 
-/// https://drafts.csswg.org/css-transitions/#animtype-number
+/// <https://drafts.csswg.org/css-transitions/#animtype-number>
 impl Animate for f64 {
     #[inline]
     fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
@@ -243,100 +234,31 @@ where
     }
 }
 
-impl AnimatedValueAsComputed for Au {}
-impl AnimatedValueAsComputed for ComputedAngle {}
-impl AnimatedValueAsComputed for SpecifiedUrl {}
+macro_rules! trivial_to_animated_value {
+    ($ty:ty) => {
+        impl $crate::values::animated::ToAnimatedValue for $ty {
+            type AnimatedValue = Self;
+
+            #[inline]
+            fn to_animated_value(self) -> Self {
+                self
+            }
+
+            #[inline]
+            fn from_animated_value(animated: Self::AnimatedValue) -> Self {
+                animated
+            }
+        }
+    }
+}
+
+trivial_to_animated_value!(Au);
+trivial_to_animated_value!(ComputedAngle);
+trivial_to_animated_value!(SpecifiedUrl);
 #[cfg(feature = "servo")]
-impl AnimatedValueAsComputed for ComputedUrl {}
-impl AnimatedValueAsComputed for bool {}
-impl AnimatedValueAsComputed for f32 {}
-
-impl<T> ToAnimatedValue for T
-where
-    T: AnimatedValueAsComputed,
-{
-    type AnimatedValue = Self;
-
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        animated
-    }
-}
-
-impl ToAnimatedValue for ComputedNonNegativeNumber {
-    type AnimatedValue = Self;
-
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        animated.0.max(0.).into()
-    }
-}
-
-impl ToAnimatedValue for ComputedGreaterThanOrEqualToOneNumber {
-    type AnimatedValue = Self;
-
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        animated.0.max(1.).into()
-    }
-}
-
-impl ToAnimatedValue for ComputedNonNegativeLength {
-    type AnimatedValue = Self;
-
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        ComputedNonNegativeLength::new(animated.px().max(0.))
-    }
-}
-
-impl ToAnimatedValue for ComputedPositiveInteger {
-    type AnimatedValue = Self;
-
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        max(animated.0, 1).into()
-    }
-}
-
-impl ToAnimatedValue for ComputedNonNegativeLengthOrPercentage {
-    type AnimatedValue = Self;
-
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        animated.0.clamp_to_non_negative().into()
-    }
-}
+trivial_to_animated_value!(ComputedUrl);
+trivial_to_animated_value!(bool);
+trivial_to_animated_value!(f32);
 
 impl ToAnimatedValue for ComputedBorderCornerRadius {
     type AnimatedValue = Self;
@@ -441,5 +363,18 @@ where
             Some(ref value) => Ok(Some(value.to_animated_zero()?)),
             None => Ok(None),
         }
+    }
+}
+
+impl<T> ToAnimatedZero for Size2D<T>
+where
+    T: ToAnimatedZero,
+{
+    #[inline]
+    fn to_animated_zero(&self) -> Result<Self, ()> {
+        Ok(Size2D::new(
+            self.width.to_animated_zero()?,
+            self.height.to_animated_zero()?,
+        ))
     }
 }

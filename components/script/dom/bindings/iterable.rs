@@ -6,7 +6,6 @@
 
 //! Implementation of `iterable<...>` and `iterable<..., ...>` WebIDL declarations.
 
-use core::nonzero::NonZero;
 use dom::bindings::codegen::Bindings::IterableIteratorBinding::IterableKeyAndValueResult;
 use dom::bindings::codegen::Bindings::IterableIteratorBinding::IterableKeyOrValueResult;
 use dom::bindings::error::Fallible;
@@ -16,13 +15,14 @@ use dom::bindings::trace::JSTraceable;
 use dom::globalscope::GlobalScope;
 use dom_struct::dom_struct;
 use js::conversions::ToJSValConvertible;
-use js::jsapi::{HandleValue, Heap, JSContext, JSObject, MutableHandleObject};
+use js::jsapi::{HandleValue, Heap, JSContext, MutableHandleObject, JSObject};
 use js::jsval::UndefinedValue;
 use std::cell::Cell;
 use std::ptr;
+use std::ptr::NonNull;
 
 /// The values that an iterator will iterate over.
-#[derive(HeapSizeOf, JSTraceable)]
+#[derive(JSTraceable, MallocSizeOf)]
 pub enum IteratorType {
     /// The keys of the iterable object.
     Keys,
@@ -62,21 +62,21 @@ impl<T: DomObject + JSTraceable + Iterable> IterableIterator<T> {
                type_: IteratorType,
                wrap: unsafe fn(*mut JSContext, &GlobalScope, Box<IterableIterator<T>>)
                      -> DomRoot<Self>) -> DomRoot<Self> {
-        let iterator = box IterableIterator {
+        let iterator = Box::new(IterableIterator {
             reflector: Reflector::new(),
             type_: type_,
             iterable: Dom::from_ref(iterable),
             index: Cell::new(0),
-        };
+        });
         reflect_dom_object(iterator, &*iterable.global(), wrap)
     }
 
     /// Return the next value from the iterable object.
     #[allow(non_snake_case)]
-    pub fn Next(&self, cx: *mut JSContext) -> Fallible<NonZero<*mut JSObject>> {
+    pub fn Next(&self, cx: *mut JSContext) -> Fallible<NonNull<JSObject>> {
         let index = self.index.get();
         rooted!(in(cx) let mut value = UndefinedValue());
-        rooted!(in(cx) let mut rval = ptr::null_mut());
+        rooted!(in(cx) let mut rval = ptr::null_mut::<JSObject>());
         let result = if index >= self.iterable.get_iterable_length() {
             dict_return(cx, rval.handle_mut(), true, value.handle())
         } else {
@@ -105,8 +105,7 @@ impl<T: DomObject + JSTraceable + Iterable> IterableIterator<T> {
         };
         self.index.set(index + 1);
         result.map(|_| {
-            assert!(!rval.is_null());
-            unsafe { NonZero::new_unchecked(rval.get()) }
+            NonNull::new(rval.get()).expect("got a null pointer")
         })
     }
 }

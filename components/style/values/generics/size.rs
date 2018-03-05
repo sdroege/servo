@@ -7,16 +7,14 @@
 use cssparser::Parser;
 use euclid::Size2D;
 use parser::ParserContext;
-use std::fmt;
-use style_traits::{ToCss, ParseError};
+use std::fmt::{self, Write};
+use style_traits::{CssWriter, ParseError, ToCss};
 use values::animated::ToAnimatedValue;
 
 /// A generic size, for `border-*-radius` longhand properties, or
 /// `border-spacing`.
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 #[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug)]
-#[derive(PartialEq, ToComputedValue)]
+#[derive(MallocSizeOf, PartialEq, ToAnimatedZero, ToComputedValue)]
 pub struct Size<L>(pub Size2D<L>);
 
 impl<L> Size<L> {
@@ -54,19 +52,13 @@ impl<L> Size<L> {
     }
 }
 
-impl<L: Clone> From<L> for Size<L> {
-    fn from(size: L) -> Self {
-        Self::new(size.clone(), size)
-    }
-}
-
 impl<L> ToCss for Size<L>
 where L:
     ToCss + PartialEq,
 {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result
-    where W:
-        fmt::Write
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
     {
         self.0.width.to_css(dest)?;
 

@@ -21,13 +21,12 @@ use dom::eventtarget::EventTarget;
 use dom::globalscope::GlobalScope;
 use dom::progressevent::ProgressEvent;
 use dom_struct::dom_struct;
-use encoding::all::UTF_8;
-use encoding::label::encoding_from_whatwg_label;
-use encoding::types::{DecoderTrap, EncodingRef};
+use encoding_rs::{Encoding, UTF_8};
 use hyper::mime::{Attr, Mime};
 use js::jsapi::Heap;
 use js::jsapi::JSAutoCompartment;
 use js::jsapi::JSContext;
+use js::jsapi::JSObject;
 use js::jsval::{self, JSVal};
 use js::typedarray::{ArrayBuffer, CreateWith};
 use servo_atoms::Atom;
@@ -39,7 +38,7 @@ use task::TaskCanceller;
 use task_source::TaskSource;
 use task_source::file_reading::{FileReadingTask, FileReadingTaskSource};
 
-#[derive(Clone, Copy, HeapSizeOf, JSTraceable, PartialEq)]
+#[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
 pub enum FileReaderFunction {
     ReadAsText,
     ReadAsDataUrl,
@@ -48,7 +47,7 @@ pub enum FileReaderFunction {
 
 pub type TrustedFileReader = Trusted<FileReader>;
 
-#[derive(Clone, HeapSizeOf)]
+#[derive(Clone, MallocSizeOf)]
 pub struct ReadMetaData {
     pub blobtype: String,
     pub label: Option<String>,
@@ -66,18 +65,18 @@ impl ReadMetaData {
     }
 }
 
-#[derive(Clone, Copy, HeapSizeOf, JSTraceable, PartialEq)]
+#[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
 pub struct GenerationId(u32);
 
 #[repr(u16)]
-#[derive(Clone, Copy, Debug, HeapSizeOf, JSTraceable, PartialEq)]
+#[derive(Clone, Copy, Debug, JSTraceable, MallocSizeOf, PartialEq)]
 pub enum FileReaderReadyState {
     Empty = FileReaderConstants::EMPTY,
     Loading = FileReaderConstants::LOADING,
     Done = FileReaderConstants::DONE,
 }
 
-#[derive(HeapSizeOf, JSTraceable)]
+#[derive(JSTraceable, MallocSizeOf)]
 pub enum FileReaderResult {
     ArrayBuffer(Heap<JSVal>),
     String(DOMString),
@@ -104,7 +103,7 @@ impl FileReader {
     }
 
     pub fn new(global: &GlobalScope) -> DomRoot<FileReader> {
-        reflect_dom_object(box FileReader::new_inherited(),
+        reflect_dom_object(Box::new(FileReader::new_inherited()),
                            global, FileReaderBinding::Wrap)
     }
 
@@ -223,8 +222,8 @@ impl FileReader {
         //https://w3c.github.io/FileAPI/#encoding-determination
         // Steps 1 & 2 & 3
         let mut encoding = blob_label.as_ref()
-            .map(|string| &**string)
-            .and_then(encoding_from_whatwg_label);
+            .map(|string| string.as_bytes())
+            .and_then(Encoding::for_label);
 
         // Step 4 & 5
         encoding = encoding.or_else(|| {
@@ -232,16 +231,16 @@ impl FileReader {
             resultmime.and_then(|Mime(_, _, ref parameters)| {
                 parameters.iter()
                     .find(|&&(ref k, _)| &Attr::Charset == k)
-                    .and_then(|&(_, ref v)| encoding_from_whatwg_label(&v.to_string()))
+                    .and_then(|&(_, ref v)| Encoding::for_label(v.as_str().as_bytes()))
             })
         });
 
         // Step 6
-        let enc = encoding.unwrap_or(UTF_8 as EncodingRef);
+        let enc = encoding.unwrap_or(UTF_8);
 
         let convert = blob_bytes;
         // Step 7
-        let output = enc.decode(convert, DecoderTrap::Replace).unwrap();
+        let (output, _, _) = enc.decode(convert);
         *result.borrow_mut() = Some(FileReaderResult::String(DOMString::from(output)));
     }
 
@@ -263,7 +262,7 @@ impl FileReader {
     fn perform_readasarraybuffer(result: &DomRefCell<Option<FileReaderResult>>,
         cx: *mut JSContext, _: ReadMetaData, bytes: &[u8]) {
         unsafe {
-            rooted!(in(cx) let mut array_buffer = ptr::null_mut());
+            rooted!(in(cx) let mut array_buffer = ptr::null_mut::<JSObject>());
             assert!(ArrayBuffer::create(cx, CreateWith::Slice(bytes), array_buffer.handle_mut()).is_ok());
 
             *result.borrow_mut() = Some(FileReaderResult::ArrayBuffer(Heap::default()));

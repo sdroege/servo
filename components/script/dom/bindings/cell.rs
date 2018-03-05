@@ -5,13 +5,13 @@
 //! A shareable mutable container for the DOM.
 
 use std::cell::{BorrowError, BorrowMutError, Ref, RefCell, RefMut};
-use style::thread_state;
+use style::thread_state::{self, ThreadState};
 
 /// A mutable field in the DOM.
 ///
-/// This extends the API of `core::cell::RefCell` to allow unsafe access in
+/// This extends the API of `std::cell::RefCell` to allow unsafe access in
 /// certain situations, with dynamic checking in debug builds.
-#[derive(Clone, Debug, Default, HeapSizeOf, PartialEq)]
+#[derive(Clone, Debug, Default, MallocSizeOf, PartialEq)]
 pub struct DomRefCell<T> {
     value: RefCell<T>,
 }
@@ -29,23 +29,11 @@ impl<T> DomRefCell<T> {
         &*self.value.as_ptr()
     }
 
-    /// Borrow the contents for the purpose of GC tracing.
-    ///
-    /// This succeeds even if the object is mutably borrowed,
-    /// so you have to be careful in trace code!
-    #[allow(unsafe_code)]
-    pub unsafe fn borrow_for_gc_trace(&self) -> &T {
-        // FIXME: IN_GC isn't reliable enough - doesn't catch minor GCs
-        // https://github.com/servo/servo/issues/6389
-        // debug_assert!(thread_state::get().contains(SCRIPT | IN_GC));
-        &*self.value.as_ptr()
-    }
-
     /// Borrow the contents for the purpose of script deallocation.
     ///
     #[allow(unsafe_code)]
     pub unsafe fn borrow_for_script_deallocation(&self) -> &mut T {
-        debug_assert!(thread_state::get().contains(thread_state::SCRIPT));
+        debug_assert!(thread_state::get().contains(ThreadState::SCRIPT));
         &mut *self.value.as_ptr()
     }
 
@@ -57,7 +45,7 @@ impl<T> DomRefCell<T> {
     }
 }
 
-// Functionality duplicated with `core::cell::RefCell`
+// Functionality duplicated with `std::cell::RefCell`
 // ===================================================
 impl<T> DomRefCell<T> {
     /// Create a new `DomRefCell` containing `value`.

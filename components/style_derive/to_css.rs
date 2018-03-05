@@ -3,33 +3,68 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use cg;
+use darling::{Error, FromMetaItem};
 use quote::Tokens;
-use syn::DeriveInput;
+use syn::{self, Ident};
 use synstructure;
 
-pub fn derive(input: DeriveInput) -> Tokens {
+pub fn derive(input: syn::DeriveInput) -> Tokens {
     let name = &input.ident;
-    let trait_path = &["style_traits", "ToCss"];
+    let trait_path = parse_quote!(style_traits::ToCss);
     let (impl_generics, ty_generics, mut where_clause) =
-        cg::trait_parts(&input, trait_path);
+        cg::trait_parts(&input, &trait_path);
 
     let input_attrs = cg::parse_input_attrs::<CssInputAttrs>(&input);
-    let style = synstructure::BindStyle::Ref.into();
-    let match_body = synstructure::each_variant(&input, &style, |bindings, variant| {
-        let mut identifier = to_css_identifier(variant.ident.as_ref());
-        let variant_attrs = cg::parse_variant_attrs::<CssVariantAttrs>(variant);
+    let s = synstructure::Structure::new(&input);
+
+    let match_body = s.each_variant(|variant| {
+        let bindings = variant.bindings();
+        let identifier = cg::to_css_identifier(variant.ast().ident.as_ref());
+        let ast = variant.ast();
+        let variant_attrs = cg::parse_variant_attrs::<CssVariantAttrs>(&ast);
         let separator = if variant_attrs.comma { ", " } else { " " };
-        let mut expr = if !bindings.is_empty() {
+
+        if variant_attrs.dimension {
+            assert_eq!(bindings.len(), 1);
+            assert!(
+                variant_attrs.function.is_none() && variant_attrs.keyword.is_none(),
+                "That makes no sense"
+            );
+        }
+
+        let mut expr = if let Some(keyword) = variant_attrs.keyword {
+            assert!(bindings.is_empty());
+            let keyword = keyword.to_string();
+            quote! {
+                ::std::fmt::Write::write_str(dest, #keyword)
+            }
+        } else if !bindings.is_empty() {
             let mut expr = quote! {};
-            for binding in bindings {
-                where_clause.add_trait_bound(&binding.field.ty);
+            if variant_attrs.iterable {
+                assert_eq!(bindings.len(), 1);
+                let binding = &bindings[0];
                 expr = quote! {
                     #expr
-                    writer.item(#binding)?;
+
+                    for item in #binding.iter() {
+                        writer.item(&item)?;
+                    }
                 };
+            } else {
+                for binding in bindings {
+                    let attrs = cg::parse_field_attrs::<CssFieldAttrs>(&binding.ast());
+                    if !attrs.ignore_bound {
+                        where_clause.add_trait_bound(&binding.ast().ty);
+                    }
+                    expr = quote! {
+                        #expr
+                        writer.item(#binding)?;
+                    };
+                }
             }
+
             quote! {{
-                let mut writer = ::style_traits::values::SequenceWriter::new(&mut *dest, #separator);
+                let mut writer = ::style_traits::values::SequenceWriter::new(dest, #separator);
                 #expr
                 Ok(())
             }}
@@ -38,7 +73,14 @@ pub fn derive(input: DeriveInput) -> Tokens {
                 ::std::fmt::Write::write_str(dest, #identifier)
             }
         };
-        if variant_attrs.function {
+
+        if variant_attrs.dimension {
+            expr = quote! {
+                #expr?;
+                ::std::fmt::Write::write_str(dest, #identifier)
+            }
+        } else if let Some(function) = variant_attrs.function {
+            let mut identifier = function.name.map_or(identifier, |name| name.to_string());
             identifier.push_str("(");
             expr = quote! {
                 ::std::fmt::Write::write_str(dest, #identifier)?;
@@ -53,7 +95,10 @@ pub fn derive(input: DeriveInput) -> Tokens {
         impl #impl_generics ::style_traits::ToCss for #name #ty_generics #where_clause {
             #[allow(unused_variables)]
             #[inline]
-            fn to_css<W>(&self, dest: &mut W) -> ::std::fmt::Result
+            fn to_css<W>(
+                &self,
+                dest: &mut ::style_traits::CssWriter<W>,
+            ) -> ::std::fmt::Result
             where
                 W: ::std::fmt::Write
             {
@@ -65,10 +110,13 @@ pub fn derive(input: DeriveInput) -> Tokens {
     };
 
     if input_attrs.derive_debug {
-        impls.append(quote! {
+        impls.append_all(quote! {
             impl #impl_generics ::std::fmt::Debug for #name #ty_generics #where_clause {
                 fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-                    ::style_traits::ToCss::to_css(self, f)
+                    ::style_traits::ToCss::to_css(
+                        self,
+                        &mut ::style_traits::CssWriter::new(f),
+                    )
                 }
             }
         });
@@ -81,51 +129,38 @@ pub fn derive(input: DeriveInput) -> Tokens {
 #[derive(Default, FromDeriveInput)]
 struct CssInputAttrs {
     derive_debug: bool,
-    function: bool,
+    function: Option<Function>,
     comma: bool,
 }
 
 #[darling(attributes(css), default)]
 #[derive(Default, FromVariant)]
-struct CssVariantAttrs {
-    function: bool,
-    comma: bool,
+pub struct CssVariantAttrs {
+    pub function: Option<Function>,
+    pub iterable: bool,
+    pub comma: bool,
+    pub dimension: bool,
+    pub keyword: Option<String>,
+    pub aliases: Option<String>,
 }
 
-/// Transforms "FooBar" to "foo-bar".
-///
-/// If the first Camel segment is "Moz" or "Webkit", the result string
-/// is prepended with "-".
-fn to_css_identifier(mut camel_case: &str) -> String {
-    camel_case = camel_case.trim_right_matches('_');
-    let mut first = true;
-    let mut result = String::with_capacity(camel_case.len());
-    while let Some(segment) = split_camel_segment(&mut camel_case) {
-        if first {
-            match segment {
-                "Moz" | "Webkit" => first = false,
-                _ => {},
-            }
-        }
-        if !first {
-            result.push_str("-");
-        }
-        first = false;
-        result.push_str(&segment.to_lowercase());
+#[darling(attributes(css), default)]
+#[derive(Default, FromField)]
+struct CssFieldAttrs {
+    ignore_bound: bool,
+}
+
+pub struct Function {
+    name: Option<Ident>,
+}
+
+impl FromMetaItem for Function {
+    fn from_word() -> Result<Self, Error> {
+        Ok(Self { name: None })
     }
-    result
-}
 
-/// Given "FooBar", returns "Foo" and sets `camel_case` to "Bar".
-fn split_camel_segment<'input>(camel_case: &mut &'input str) -> Option<&'input str> {
-    let index = match camel_case.chars().next() {
-        None => return None,
-        Some(ch) => ch.len_utf8(),
-    };
-    let end_position = camel_case[index..]
-        .find(char::is_uppercase)
-        .map_or(camel_case.len(), |pos| index + pos);
-    let result = &camel_case[..end_position];
-    *camel_case = &camel_case[end_position..];
-    Some(result)
+    fn from_string(name: &str) -> Result<Self, Error> {
+        let name = Ident::from(name);
+        Ok(Self { name: Some(name) })
+    }
 }

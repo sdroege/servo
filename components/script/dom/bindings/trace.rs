@@ -35,6 +35,7 @@ use canvas_traits::canvas::{CompositionOrBlending, LineCapStyle, LineJoinStyle, 
 use canvas_traits::webgl::{WebGLBufferId, WebGLFramebufferId, WebGLProgramId, WebGLRenderbufferId};
 use canvas_traits::webgl::{WebGLChan, WebGLContextShareMode, WebGLError, WebGLPipeline, WebGLMsgSender};
 use canvas_traits::webgl::{WebGLReceiver, WebGLSender, WebGLShaderId, WebGLTextureId, WebGLVertexArrayId};
+use canvas_traits::webgl::{WebGLSLVersion, WebGLVersion};
 use cssparser::RGBA;
 use devtools_traits::{CSSError, TimelineMarkerType, WorkerId};
 use dom::abstractworker::SharedRt;
@@ -46,8 +47,8 @@ use dom::bindings::root::{Dom, DomRoot};
 use dom::bindings::str::{DOMString, USVString};
 use dom::bindings::utils::WindowProxyHandler;
 use dom::document::PendingRestyle;
-use encoding::types::EncodingRef;
-use euclid::{Transform2D, Transform3D, Point2D, Vector2D, Rect, TypedSize2D, ScaleFactor};
+use encoding_rs::Encoding;
+use euclid::{Transform2D, Transform3D, Point2D, Vector2D, Rect, TypedSize2D, TypedScale};
 use euclid::Length as EuclidLength;
 use html5ever::{Prefix, LocalName, Namespace, QualName};
 use html5ever::buffer_queue::BufferQueue;
@@ -61,7 +62,8 @@ use js::glue::{CallObjectTracer, CallValueTracer};
 use js::jsapi::{GCTraceKindToAscii, Heap, JSObject, JSTracer, TraceKind};
 use js::jsval::JSVal;
 use js::rust::Runtime;
-use msg::constellation_msg::{BrowsingContextId, FrameType, PipelineId, TopLevelBrowsingContextId};
+use metrics::{InteractiveMetrics, InteractiveWindow};
+use msg::constellation_msg::{BrowsingContextId, PipelineId, TopLevelBrowsingContextId};
 use net_traits::{Metadata, NetworkError, ReferrerPolicy, ResourceThreads};
 use net_traits::filemanager_thread::RelativePos;
 use net_traits::image::base::{Image, ImageMetadata};
@@ -77,7 +79,7 @@ use profile_traits::time::ProfilerChan as TimeProfilerChan;
 use script_layout_interface::OpaqueStyleAndLayoutData;
 use script_layout_interface::reporter::CSSErrorReporter;
 use script_layout_interface::rpc::LayoutRPC;
-use script_traits::{DocumentActivity, ScriptToConstellationChan, TimerEventId, TimerSource, TouchpadPressurePhase};
+use script_traits::{DocumentActivity, ScriptToConstellationChan, TimerEventId, TimerSource};
 use script_traits::{UntrustedNodeAddress, WindowSizeData, WindowSizeType};
 use script_traits::DrawAPaintImageResult;
 use selectors::matching::ElementSelectorFlags;
@@ -103,14 +105,14 @@ use style::media_queries::MediaList;
 use style::properties::PropertyDeclarationBlock;
 use style::selector_parser::{PseudoElement, Snapshot};
 use style::shared_lock::{SharedRwLock as StyleSharedRwLock, Locked as StyleLocked};
-use style::stylesheet_set::StylesheetSet;
+use style::stylesheet_set::DocumentStylesheetSet;
 use style::stylesheets::{CssRules, FontFaceRule, KeyframesRule, MediaRule, Stylesheet};
 use style::stylesheets::{NamespaceRule, StyleRule, ImportRule, SupportsRule, ViewportRule};
 use style::stylesheets::keyframes_rule::Keyframe;
 use style::values::specified::Length;
 use time::Duration;
 use uuid::Uuid;
-use webrender_api::ImageKey;
+use webrender_api::{DocumentId, ImageKey};
 use webvr_traits::WebVRGamepadHand;
 
 /// A trait to allow tracing (only) DOM objects.
@@ -121,7 +123,7 @@ pub unsafe trait JSTraceable {
 
 unsafe_no_jsmanaged_fields!(CSSError);
 
-unsafe_no_jsmanaged_fields!(EncodingRef);
+unsafe_no_jsmanaged_fields!(&'static Encoding);
 
 unsafe_no_jsmanaged_fields!(Reflector);
 
@@ -204,7 +206,7 @@ unsafe impl<T: JSTraceable> JSTraceable for UnsafeCell<T> {
 
 unsafe impl<T: JSTraceable> JSTraceable for DomRefCell<T> {
     unsafe fn trace(&self, trc: *mut JSTracer) {
-        (*self).borrow_for_gc_trace().trace(trc)
+        (*self).borrow().trace(trc)
     }
 }
 
@@ -283,7 +285,7 @@ unsafe impl<T: JSTraceable, U: JSTraceable> JSTraceable for Result<T, U> {
 unsafe impl<K, V, S> JSTraceable for HashMap<K, V, S>
     where K: Hash + Eq + JSTraceable,
           V: JSTraceable,
-          S: BuildHasher
+          S: BuildHasher,
 {
     #[inline]
     unsafe fn trace(&self, trc: *mut JSTracer) {
@@ -296,7 +298,7 @@ unsafe impl<K, V, S> JSTraceable for HashMap<K, V, S>
 
 unsafe impl<T, S> JSTraceable for HashSet<T, S>
     where T: Hash + Eq + JSTraceable,
-          S: BuildHasher
+          S: BuildHasher,
 {
     #[inline]
     unsafe fn trace(&self, trc: *mut JSTracer) {
@@ -349,7 +351,7 @@ unsafe_no_jsmanaged_fields!(PropertyDeclarationBlock);
 // These three are interdependent, if you plan to put jsmanaged data
 // in one of these make sure it is propagated properly to containing structs
 unsafe_no_jsmanaged_fields!(DocumentActivity, WindowSizeData, WindowSizeType);
-unsafe_no_jsmanaged_fields!(BrowsingContextId, FrameType, PipelineId, TopLevelBrowsingContextId);
+unsafe_no_jsmanaged_fields!(BrowsingContextId, PipelineId, TopLevelBrowsingContextId);
 unsafe_no_jsmanaged_fields!(TimerEventId, TimerSource);
 unsafe_no_jsmanaged_fields!(TimelineMarkerType);
 unsafe_no_jsmanaged_fields!(WorkerId);
@@ -383,7 +385,6 @@ unsafe_no_jsmanaged_fields!(Request);
 unsafe_no_jsmanaged_fields!(RequestInit);
 unsafe_no_jsmanaged_fields!(SharedRt);
 unsafe_no_jsmanaged_fields!(StyleSharedRwLock);
-unsafe_no_jsmanaged_fields!(TouchpadPressurePhase);
 unsafe_no_jsmanaged_fields!(USVString);
 unsafe_no_jsmanaged_fields!(ReferrerPolicy);
 unsafe_no_jsmanaged_fields!(Response);
@@ -397,6 +398,7 @@ unsafe_no_jsmanaged_fields!(OpaqueStyleAndLayoutData);
 unsafe_no_jsmanaged_fields!(PathBuf);
 unsafe_no_jsmanaged_fields!(CSSErrorReporter);
 unsafe_no_jsmanaged_fields!(DrawAPaintImageResult);
+unsafe_no_jsmanaged_fields!(DocumentId);
 unsafe_no_jsmanaged_fields!(ImageKey);
 unsafe_no_jsmanaged_fields!(WebGLBufferId);
 unsafe_no_jsmanaged_fields!(WebGLChan);
@@ -409,9 +411,13 @@ unsafe_no_jsmanaged_fields!(WebGLRenderbufferId);
 unsafe_no_jsmanaged_fields!(WebGLShaderId);
 unsafe_no_jsmanaged_fields!(WebGLTextureId);
 unsafe_no_jsmanaged_fields!(WebGLVertexArrayId);
+unsafe_no_jsmanaged_fields!(WebGLVersion);
+unsafe_no_jsmanaged_fields!(WebGLSLVersion);
 unsafe_no_jsmanaged_fields!(MediaList);
 unsafe_no_jsmanaged_fields!(WebVRGamepadHand);
 unsafe_no_jsmanaged_fields!(ScriptToConstellationChan);
+unsafe_no_jsmanaged_fields!(InteractiveMetrics);
+unsafe_no_jsmanaged_fields!(InteractiveWindow);
 
 unsafe impl<'a> JSTraceable for &'a str {
     #[inline]
@@ -519,7 +525,7 @@ unsafe impl JSTraceable for Point2D<f32> {
     }
 }
 
-unsafe impl<T, U> JSTraceable for ScaleFactor<f32, T, U> {
+unsafe impl<T, U> JSTraceable for TypedScale<f32, T, U> {
     #[inline]
     unsafe fn trace(&self, _trc: *mut JSTracer) {
         // Do nothing
@@ -652,7 +658,7 @@ unsafe impl JSTraceable for StyleLocked<MediaList> {
     }
 }
 
-unsafe impl<S> JSTraceable for StylesheetSet<S>
+unsafe impl<S> JSTraceable for DocumentStylesheetSet<S>
 where
     S: JSTraceable + ::style::stylesheets::StylesheetInDocument + PartialEq + 'static,
 {
@@ -759,7 +765,7 @@ unsafe impl<T: JSTraceable + 'static> JSTraceable for RootedTraceableBox<T> {
 impl<T: JSTraceable + 'static> RootedTraceableBox<T> {
     /// DomRoot a JSTraceable thing for the life of this RootedTraceable
     pub fn new(traceable: T) -> RootedTraceableBox<T> {
-        let traceable = Box::into_raw(box traceable);
+        let traceable = Box::into_raw(Box::new(traceable));
         unsafe {
             RootedTraceableSet::add(traceable);
         }

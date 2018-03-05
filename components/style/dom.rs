@@ -7,7 +7,7 @@
 #![allow(unsafe_code)]
 #![deny(missing_docs)]
 
-use {Atom, Namespace, LocalName};
+use {Atom, Namespace, LocalName, WeakAtom};
 use applicable_declarations::ApplicableDeclarationBlock;
 use atomic_refcell::{AtomicRef, AtomicRefCell, AtomicRefMut};
 #[cfg(feature = "gecko")] use context::PostAnimationTasks;
@@ -17,23 +17,18 @@ use element_state::ElementState;
 use font_metrics::FontMetricsProvider;
 use media_queries::Device;
 use properties::{AnimationRules, ComputedValues, PropertyDeclarationBlock};
-#[cfg(feature = "gecko")] use properties::LonghandId;
-#[cfg(feature = "gecko")] use properties::animated_properties::AnimationValue;
-#[cfg(feature = "gecko")] use properties::animated_properties::TransitionProperty;
-use rule_tree::CascadeLevel;
-use selector_parser::{AttrValue, ElementExt};
-use selector_parser::{PseudoClassStringArg, PseudoElement};
-use selectors::matching::{ElementSelectorFlags, VisitedHandlingMode};
+use selector_parser::{AttrValue, PseudoClassStringArg, PseudoElement, SelectorImpl};
+use selectors::Element as SelectorsElement;
+use selectors::matching::{ElementSelectorFlags, QuirksMode, VisitedHandlingMode};
 use selectors::sink::Push;
 use servo_arc::{Arc, ArcBorrow};
 use shared_lock::Locked;
 use std::fmt;
-#[cfg(feature = "gecko")] use hash::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::ops::Deref;
-use stylist::Stylist;
-use traversal_flags::{TraversalFlags, self};
+use stylist::CascadeData;
+use traversal_flags::TraversalFlags;
 
 /// An opaque handle to a node, which, unlike UnsafeNode, cannot be transformed
 /// back into a non-opaque representation. The only safe operation that can be
@@ -45,7 +40,7 @@ use traversal_flags::{TraversalFlags, self};
 /// data structures. Also, layout code tends to be faster when the DOM is not being accessed, for
 /// locality reasons. Using `OpaqueNode` enforces this invariant.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf, Deserialize, Serialize))]
+#[cfg_attr(feature = "servo", derive(MallocSizeOf, Deserialize, Serialize))]
 pub struct OpaqueNode(pub usize);
 
 impl OpaqueNode {
@@ -65,61 +60,169 @@ pub trait NodeInfo {
     fn is_element(&self) -> bool;
     /// Whether this node is a text node.
     fn is_text_node(&self) -> bool;
-
-    /// Whether this node needs layout.
-    ///
-    /// Comments, doctypes, etc are ignored by layout algorithms.
-    fn needs_layout(&self) -> bool { self.is_element() || self.is_text_node() }
 }
 
 /// A node iterator that only returns node that don't need layout.
 pub struct LayoutIterator<T>(pub T);
 
-impl<T, I> Iterator for LayoutIterator<T>
-    where T: Iterator<Item=I>,
-          I: NodeInfo,
+impl<T, N> Iterator for LayoutIterator<T>
+where
+    T: Iterator<Item = N>,
+    N: NodeInfo,
 {
-    type Item = I;
-    fn next(&mut self) -> Option<I> {
+    type Item = N;
+
+    fn next(&mut self) -> Option<N> {
         loop {
+            let n = self.0.next()?;
             // Filter out nodes that layout should ignore.
-            let n = self.0.next();
-            if n.is_none() || n.as_ref().unwrap().needs_layout() {
-                return n
+            if n.is_text_node() || n.is_element() {
+                return Some(n)
             }
         }
     }
 }
 
+/// An iterator over the DOM children of a node.
+pub struct DomChildren<N>(Option<N>);
+impl<N> Iterator for DomChildren<N>
+where
+    N: TNode
+{
+    type Item = N;
+
+    fn next(&mut self) -> Option<N> {
+        let n = self.0.take()?;
+        self.0 = n.next_sibling();
+        Some(n)
+    }
+}
+
+/// An iterator over the DOM descendants of a node in pre-order.
+pub struct DomDescendants<N> {
+    previous: Option<N>,
+    scope: N,
+}
+
+impl<N> Iterator for DomDescendants<N>
+where
+    N: TNode
+{
+    type Item = N;
+
+    #[inline]
+    fn next(&mut self) -> Option<N> {
+        let prev = self.previous.take()?;
+        self.previous = prev.next_in_preorder(Some(self.scope));
+        self.previous
+    }
+}
+
+/// The `TDocument` trait, to represent a document node.
+pub trait TDocument : Sized + Copy + Clone {
+    /// The concrete `TNode` type.
+    type ConcreteNode: TNode<ConcreteDocument = Self>;
+
+    /// Get this document as a `TNode`.
+    fn as_node(&self) -> Self::ConcreteNode;
+
+    /// Returns whether this document is an HTML document.
+    fn is_html_document(&self) -> bool;
+
+    /// Returns the quirks mode of this document.
+    fn quirks_mode(&self) -> QuirksMode;
+
+    /// Get a list of elements with a given ID in this document, sorted by
+    /// document position.
+    ///
+    /// Can return an error to signal that this list is not available, or also
+    /// return an empty slice.
+    fn elements_with_id(
+        &self,
+        _id: &Atom,
+    ) -> Result<&[<Self::ConcreteNode as TNode>::ConcreteElement], ()> {
+        Err(())
+    }
+}
+
 /// The `TNode` trait. This is the main generic trait over which the style
 /// system can be implemented.
-pub trait TNode : Sized + Copy + Clone + Debug + NodeInfo {
+pub trait TNode : Sized + Copy + Clone + Debug + NodeInfo + PartialEq {
     /// The concrete `TElement` type.
     type ConcreteElement: TElement<ConcreteNode = Self>;
 
-    /// A concrete children iterator type in order to iterate over the `Node`s.
-    ///
-    /// TODO(emilio): We should eventually replace this with the `impl Trait`
-    /// syntax.
-    type ConcreteChildrenIterator: Iterator<Item = Self>;
+    /// The concrete `TDocument` type.
+    type ConcreteDocument: TDocument<ConcreteNode = Self>;
 
     /// Get this node's parent node.
     fn parent_node(&self) -> Option<Self>;
 
-    /// Get this node's parent element if present.
-    fn parent_element(&self) -> Option<Self::ConcreteElement> {
-        self.parent_node().and_then(|n| n.as_element())
+    /// Get this node's first child.
+    fn first_child(&self) -> Option<Self>;
+
+    /// Get this node's first child.
+    fn last_child(&self) -> Option<Self>;
+
+    /// Get this node's previous sibling.
+    fn prev_sibling(&self) -> Option<Self>;
+
+    /// Get this node's next sibling.
+    fn next_sibling(&self) -> Option<Self>;
+
+    /// Get the owner document of this node.
+    fn owner_doc(&self) -> Self::ConcreteDocument;
+
+    /// Iterate over the DOM children of a node.
+    fn dom_children(&self) -> DomChildren<Self> {
+        DomChildren(self.first_child())
     }
 
-    /// Returns an iterator over this node's children.
-    fn children(&self) -> LayoutIterator<Self::ConcreteChildrenIterator>;
+    /// Returns whether the node is attached to a document.
+    fn is_in_document(&self) -> bool;
+
+    /// Iterate over the DOM children of a node, in preorder.
+    fn dom_descendants(&self) -> DomDescendants<Self> {
+        DomDescendants {
+            previous: Some(*self),
+            scope: *self,
+        }
+    }
+
+    /// Returns the next children in pre-order, optionally scoped to a subtree
+    /// root.
+    #[inline]
+    fn next_in_preorder(&self, scoped_to: Option<Self>) -> Option<Self> {
+        if let Some(c) = self.first_child() {
+            return Some(c);
+        }
+
+        if Some(*self) == scoped_to {
+            return None;
+        }
+
+        let mut current = *self;
+        loop {
+            if let Some(s) = current.next_sibling() {
+                return Some(s);
+            }
+
+            let parent = current.parent_node();
+            if parent == scoped_to {
+                return None;
+            }
+
+            current = parent.expect("Not a descendant of the scope?");
+        }
+    }
 
     /// Get this node's parent element from the perspective of a restyle
     /// traversal.
     fn traversal_parent(&self) -> Option<Self::ConcreteElement>;
 
-    /// Get this node's children from the perspective of a restyle traversal.
-    fn traversal_children(&self) -> LayoutIterator<Self::ConcreteChildrenIterator>;
+    /// Get this node's parent element if present.
+    fn parent_element(&self) -> Option<Self::ConcreteElement> {
+        self.parent_node().and_then(|n| n.as_element())
+    }
 
     /// Converts self into an `OpaqueNode`.
     fn opaque(&self) -> OpaqueNode;
@@ -130,34 +233,8 @@ pub trait TNode : Sized + Copy + Clone + Debug + NodeInfo {
     /// Get this node as an element, if it's one.
     fn as_element(&self) -> Option<Self::ConcreteElement>;
 
-    /// Whether this node can be fragmented. This is used for multicol, and only
-    /// for Servo.
-    fn can_be_fragmented(&self) -> bool;
-
-    /// Set whether this node can be fragmented.
-    unsafe fn set_can_be_fragmented(&self, value: bool);
-
-    /// Whether this node is in the document right now needed to clear the
-    /// restyle data appropriately on some forced restyles.
-    fn is_in_doc(&self) -> bool;
-}
-
-/// Wrapper to output the ElementData along with the node when formatting for
-/// Debug.
-pub struct ShowData<N: TNode>(pub N);
-impl<N: TNode> Debug for ShowData<N> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt_with_data(f, self.0)
-    }
-}
-
-/// Wrapper to output the primary computed values along with the node when
-/// formatting for Debug. This is very verbose.
-pub struct ShowDataAndPrimaryValues<N: TNode>(pub N);
-impl<N: TNode> Debug for ShowDataAndPrimaryValues<N> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt_with_data_and_primary_values(f, self.0)
-    }
+    /// Get this node as a document, if it's one.
+    fn as_document(&self) -> Option<Self::ConcreteDocument>;
 }
 
 /// Wrapper to output the subtree rather than the single node when formatting
@@ -182,7 +259,9 @@ impl<N: TNode> Debug for ShowSubtreeData<N> {
 
 /// Wrapper to output the subtree along with the ElementData and primary
 /// ComputedValues when formatting for Debug. This is extremely verbose.
+#[cfg(feature = "servo")]
 pub struct ShowSubtreeDataAndPrimaryValues<N: TNode>(pub N);
+#[cfg(feature = "servo")]
 impl<N: TNode> Debug for ShowSubtreeDataAndPrimaryValues<N> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "DOM Subtree:")?;
@@ -204,6 +283,7 @@ fn fmt_with_data<N: TNode>(f: &mut fmt::Formatter, n: N) -> fmt::Result {
     }
 }
 
+#[cfg(feature = "servo")]
 fn fmt_with_data_and_primary_values<N: TNode>(f: &mut fmt::Formatter, n: N) -> fmt::Result {
     if let Some(el) = n.as_element() {
         let dd = el.has_dirty_descendants();
@@ -224,29 +304,35 @@ fn fmt_subtree<F, N: TNode>(f: &mut fmt::Formatter, stringify: &F, n: N, indent:
         write!(f, "  ")?;
     }
     stringify(f, n)?;
-    for kid in n.traversal_children() {
-        writeln!(f, "")?;
-        fmt_subtree(f, stringify, kid, indent + 1)?;
+    if let Some(e) = n.as_element() {
+        for kid in e.traversal_children() {
+            writeln!(f, "")?;
+            fmt_subtree(f, stringify, kid, indent + 1)?;
+        }
     }
 
     Ok(())
 }
 
-/// A trait used to synthesize presentational hints for HTML element attributes.
-pub trait PresentationalHintsSynthesizer {
-    /// Generate the proper applicable declarations due to presentational hints,
-    /// and insert them into `hints`.
-    fn synthesize_presentational_hints_for_legacy_attributes<V>(&self,
-                                                                visited_handling: VisitedHandlingMode,
-                                                                hints: &mut V)
-        where V: Push<ApplicableDeclarationBlock>;
-}
-
 /// The element trait, the main abstraction the style crate acts over.
-pub trait TElement : Eq + PartialEq + Debug + Hash + Sized + Copy + Clone +
-                     ElementExt + PresentationalHintsSynthesizer {
+pub trait TElement
+    : Eq
+    + PartialEq
+    + Debug
+    + Hash
+    + Sized
+    + Copy
+    + Clone
+    + SelectorsElement<Impl = SelectorImpl>
+{
     /// The concrete node type.
     type ConcreteNode: TNode<ConcreteElement = Self>;
+
+    /// A concrete children iterator type in order to iterate over the `Node`s.
+    ///
+    /// TODO(emilio): We should eventually replace this with the `impl Trait`
+    /// syntax.
+    type TraversalChildrenIterator: Iterator<Item = Self::ConcreteNode>;
 
     /// Type of the font metrics provider
     ///
@@ -264,6 +350,11 @@ pub trait TElement : Eq + PartialEq + Debug + Hash + Sized + Copy + Clone +
     /// font-size used for rem units.
     fn owner_doc_matches_for_testing(&self, _: &Device) -> bool { true }
 
+    /// Whether this element should match user and author rules.
+    ///
+    /// We use this for Native Anonymous Content in Gecko.
+    fn matches_user_and_author_rules(&self) -> bool { true }
+
     /// Returns the depth of this element in the DOM.
     fn depth(&self) -> usize {
         let mut depth = 0;
@@ -276,11 +367,23 @@ pub trait TElement : Eq + PartialEq + Debug + Hash + Sized + Copy + Clone +
         depth
     }
 
+    /// The style scope of this element is a node that represents which rules
+    /// apply to the element.
+    ///
+    /// In Servo, where we don't know about Shadow DOM or XBL, the style scope
+    /// is always the document.
+    fn style_scope(&self) -> Self::ConcreteNode {
+        self.as_node().owner_doc().as_node()
+    }
+
     /// Get this node's parent element from the perspective of a restyle
     /// traversal.
     fn traversal_parent(&self) -> Option<Self> {
         self.as_node().traversal_parent()
     }
+
+    /// Get this node's children from the perspective of a restyle traversal.
+    fn traversal_children(&self) -> LayoutIterator<Self::TraversalChildrenIterator>;
 
     /// Returns the parent element we should inherit from.
     ///
@@ -309,6 +412,14 @@ pub trait TElement : Eq + PartialEq + Debug + Hash + Sized + Copy + Clone +
         F: FnMut(Self),
     {}
 
+    /// Return whether this element is an element in the HTML namespace.
+    fn is_html_element(&self) -> bool;
+
+    /// Return the list of slotted nodes of this node.
+    fn slotted_nodes(&self) -> &[Self::ConcreteNode] {
+        &[]
+    }
+
     /// For a given NAC element, return the closest non-NAC ancestor, which is
     /// guaranteed to exist.
     fn closest_non_native_anonymous_ancestor(&self) -> Option<Self> {
@@ -324,49 +435,39 @@ pub trait TElement : Eq + PartialEq + Debug + Hash + Sized + Copy + Clone +
     }
 
     /// Get this element's SMIL override declarations.
-    fn get_smil_override(&self) -> Option<ArcBorrow<Locked<PropertyDeclarationBlock>>> {
-        None
-    }
-
-    /// Get this element's animation rule by the cascade level.
-    fn get_animation_rule_by_cascade(&self,
-                                     _cascade_level: CascadeLevel)
-                                     -> Option<Arc<Locked<PropertyDeclarationBlock>>> {
+    fn smil_override(&self) -> Option<ArcBorrow<Locked<PropertyDeclarationBlock>>> {
         None
     }
 
     /// Get the combined animation and transition rules.
-    fn get_animation_rules(&self) -> AnimationRules {
+    ///
+    /// FIXME(emilio): Is this really useful?
+    fn animation_rules(&self) -> AnimationRules {
         if !self.may_have_animations() {
             return AnimationRules(None, None)
         }
 
-        AnimationRules(
-            self.get_animation_rule(),
-            self.get_transition_rule(),
-        )
+        AnimationRules(self.animation_rule(), self.transition_rule())
     }
 
     /// Get this element's animation rule.
-    fn get_animation_rule(&self)
-                          -> Option<Arc<Locked<PropertyDeclarationBlock>>> {
+    fn animation_rule(&self) -> Option<Arc<Locked<PropertyDeclarationBlock>>> {
         None
     }
 
     /// Get this element's transition rule.
-    fn get_transition_rule(&self)
-                           -> Option<Arc<Locked<PropertyDeclarationBlock>>> {
+    fn transition_rule(&self) -> Option<Arc<Locked<PropertyDeclarationBlock>>> {
         None
     }
 
     /// Get this element's state, for non-tree-structural pseudos.
-    fn get_state(&self) -> ElementState;
+    fn state(&self) -> ElementState;
 
     /// Whether this element has an attribute with a given namespace.
     fn has_attr(&self, namespace: &Namespace, attr: &LocalName) -> bool;
 
     /// The ID for this element.
-    fn get_id(&self) -> Option<Atom>;
+    fn id(&self) -> Option<&WeakAtom>;
 
     /// Internal iterator for the classes of this element.
     fn each_class<F>(&self, callback: F) where F: FnMut(&Atom);
@@ -429,11 +530,6 @@ pub trait TElement : Eq + PartialEq + Debug + Hash + Sized + Copy + Clone +
             // traversal in that we had elements that handled snapshot.
             return data.has_styles() &&
                    !data.hint.has_animation_hint_or_recascade();
-        }
-
-        if traversal_flags.contains(traversal_flags::UnstyledOnly) {
-            // We don't process invalidations in UnstyledOnly mode.
-            return data.has_styles();
         }
 
         if self.has_snapshot() && !self.handled_snapshot() {
@@ -564,7 +660,7 @@ pub trait TElement : Eq + PartialEq + Debug + Hash + Sized + Copy + Clone +
     /// Whether we should skip any root- or item-based display property
     /// blockification on this element.  (This function exists so that Gecko
     /// native anonymous content can opt out of this style fixup.)
-    fn skip_root_and_item_based_display_fixup(&self) -> bool;
+    fn skip_item_display_fixup(&self) -> bool;
 
     /// Sets selector flags, which indicate what kinds of selectors may have
     /// matched on this element and therefore what kind of work may need to
@@ -623,16 +719,16 @@ pub trait TElement : Eq + PartialEq + Debug + Hash + Sized + Copy + Clone +
         None
     }
 
-    /// Returns the rule hash target given an element.
+    /// Return the element which we can use to look up rules in the selector
+    /// maps.
+    ///
+    /// This is always the element itself, except in the case where we are an
+    /// element-backed pseudo-element, in which case we return the originating
+    /// element.
     fn rule_hash_target(&self) -> Self {
-        let is_implemented_pseudo =
-            self.implemented_pseudo_element().is_some();
-
-        // NB: This causes use to rule has pseudo selectors based on the
-        // properties of the originating element (which is fine, given the
-        // find_first_from_right usage).
-        if is_implemented_pseudo {
-            self.closest_non_native_anonymous_ancestor().unwrap()
+        if self.implemented_pseudo_element().is_some() {
+            self.closest_non_native_anonymous_ancestor()
+                .expect("Trying to collect rules for a detached pseudo-element")
         } else {
             *self
         }
@@ -641,17 +737,33 @@ pub trait TElement : Eq + PartialEq + Debug + Hash + Sized + Copy + Clone +
     /// Implements Gecko's `nsBindingManager::WalkRules`.
     ///
     /// Returns whether to cut off the inheritance.
-    fn each_xbl_stylist<F>(&self, _: F) -> bool
+    fn each_xbl_cascade_data<'a, F>(&self, _: F) -> bool
     where
-        F: FnMut(&Stylist),
+        Self: 'a,
+        F: FnMut(&'a CascadeData, QuirksMode),
     {
         false
     }
 
-    /// Gets the current existing CSS transitions, by |property, end value| pairs in a HashMap.
-    #[cfg(feature = "gecko")]
-    fn get_css_transitions_info(&self)
-                                -> HashMap<TransitionProperty, Arc<AnimationValue>>;
+    /// Executes the callback for each applicable style rule data which isn't
+    /// the main document's data (which stores UA / author rules).
+    ///
+    /// Returns whether normal document author rules should apply.
+    fn each_applicable_non_document_style_rule_data<'a, F>(&self, mut f: F) -> bool
+    where
+        Self: 'a,
+        F: FnMut(&'a CascadeData, QuirksMode),
+    {
+        let cut_off_inheritance = self.each_xbl_cascade_data(&mut f);
+
+        let mut current = self.assigned_slot();
+        while let Some(slot) = current {
+            slot.each_xbl_cascade_data(&mut f);
+            current = slot.assigned_slot();
+        }
+
+        cut_off_inheritance
+    }
 
     /// Does a rough (and cheap) check for whether or not transitions might need to be updated that
     /// will quickly return false for the common case of no transitions specified or running. If
@@ -676,17 +788,6 @@ pub trait TElement : Eq + PartialEq + Debug + Hash + Sized + Copy + Clone +
         after_change_style: &ComputedValues
     ) -> bool;
 
-    /// Returns true if we need to update transitions for the specified property on this element.
-    #[cfg(feature = "gecko")]
-    fn needs_transitions_update_per_property(
-        &self,
-        property: &LonghandId,
-        combined_duration: f32,
-        before_change_style: &ComputedValues,
-        after_change_style: &ComputedValues,
-        existing_transitions: &HashMap<TransitionProperty, Arc<AnimationValue>>
-    ) -> bool;
-
     /// Returns the value of the `xml:lang=""` attribute (or, if appropriate,
     /// the `lang=""` attribute) on this element.
     fn lang_attr(&self) -> Option<AttrValue>;
@@ -705,6 +806,16 @@ pub trait TElement : Eq + PartialEq + Debug + Hash + Sized + Copy + Clone +
     /// Returns whether this element is the main body element of the HTML
     /// document it is on.
     fn is_html_document_body_element(&self) -> bool;
+
+    /// Generate the proper applicable declarations due to presentational hints,
+    /// and insert them into `hints`.
+    fn synthesize_presentational_hints_for_legacy_attributes<V>(
+        &self,
+        visited_handling: VisitedHandlingMode,
+        hints: &mut V,
+    )
+    where
+        V: Push<ApplicableDeclarationBlock>;
 }
 
 /// TNode and TElement aren't Send because we want to be careful and explicit

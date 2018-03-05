@@ -3,10 +3,11 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use properties::{parse, parse_input};
-use style::computed_values::display::T::inline_block;
+use style::computed_values::display::T as Display;
 use style::properties::{PropertyDeclaration, Importance};
+use style::properties::declaration_block::PropertyDeclarationBlock;
 use style::properties::parse_property_declaration_list;
-use style::values::{CustomIdent, RGBA, Auto};
+use style::values::{CustomIdent, RGBA};
 use style::values::generics::flex::FlexBasis;
 use style::values::specified::{BorderStyle, BorderSideWidth, Color};
 use style::values::specified::{Length, LengthOrPercentage, LengthOrPercentageOrAuto};
@@ -14,6 +15,18 @@ use style::values::specified::NoCalcLength;
 use style::values::specified::url::SpecifiedUrl;
 use style_traits::ToCss;
 use stylesheets::block_from;
+
+trait ToCssString {
+    fn to_css_string(&self) -> String;
+}
+
+impl ToCssString for PropertyDeclarationBlock {
+    fn to_css_string(&self) -> String {
+        let mut css = String::new();
+        self.to_css(&mut css).unwrap();
+        css
+    }
+}
 
 #[test]
 fn property_declaration_block_should_serialize_correctly() {
@@ -32,16 +45,15 @@ fn property_declaration_block_should_serialize_correctly() {
             LengthOrPercentageOrAuto::Length(NoCalcLength::from_px(20f32))),
          Importance::Important),
 
-        (PropertyDeclaration::Display(
-            inline_block),
+        (PropertyDeclaration::Display(Display::InlineBlock),
          Importance::Normal),
 
         (PropertyDeclaration::OverflowX(
-            OverflowValue::auto),
+            OverflowValue::Auto),
          Importance::Normal),
 
         (PropertyDeclaration::OverflowY(
-            OverflowValue::auto),
+            OverflowValue::Auto),
          Importance::Normal),
     ];
 
@@ -74,7 +86,7 @@ mod shorthand_serialization {
         fn equal_overflow_properties_should_serialize_to_single_value() {
             let mut properties = Vec::new();
 
-            let overflow = OverflowValue::auto;
+            let overflow = OverflowValue::Auto;
             properties.push(PropertyDeclaration::OverflowX(overflow));
             properties.push(PropertyDeclaration::OverflowY(overflow));
 
@@ -86,10 +98,10 @@ mod shorthand_serialization {
         fn different_overflow_properties_should_serialize_to_two_values() {
             let mut properties = Vec::new();
 
-            let overflow_x = OverflowValue::scroll;
+            let overflow_x = OverflowValue::Scroll;
             properties.push(PropertyDeclaration::OverflowX(overflow_x));
 
-            let overflow_y = OverflowValue::auto;
+            let overflow_y = OverflowValue::Auto;
             properties.push(PropertyDeclaration::OverflowY(overflow_y));
 
             let serialization = shorthand_properties_to_string(properties);
@@ -171,7 +183,7 @@ mod shorthand_serialization {
         fn different_longhands_should_serialize_to_long_form() {
           let mut properties = Vec::new();
 
-          let solid = BorderStyle::solid;
+          let solid = BorderStyle::Solid;
 
           properties.push(PropertyDeclaration::BorderTopStyle(solid.clone()));
           properties.push(PropertyDeclaration::BorderRightStyle(solid.clone()));
@@ -202,7 +214,7 @@ mod shorthand_serialization {
         fn same_longhands_should_serialize_correctly() {
           let mut properties = Vec::new();
 
-          let solid = BorderStyle::solid;
+          let solid = BorderStyle::Solid;
 
           properties.push(PropertyDeclaration::BorderTopStyle(solid.clone()));
           properties.push(PropertyDeclaration::BorderRightStyle(solid.clone()));
@@ -303,8 +315,8 @@ mod shorthand_serialization {
         fn border_style_should_serialize_correctly() {
             let mut properties = Vec::new();
 
-            let solid = BorderStyle::solid;
-            let dotted = BorderStyle::dotted;
+            let solid = BorderStyle::Solid;
+            let dotted = BorderStyle::Dotted;
             properties.push(PropertyDeclaration::BorderTopStyle(solid.clone()));
             properties.push(PropertyDeclaration::BorderRightStyle(dotted.clone()));
             properties.push(PropertyDeclaration::BorderBottomStyle(solid));
@@ -345,7 +357,7 @@ mod shorthand_serialization {
         fn border_top_and_color() {
             let mut properties = Vec::new();
             properties.push(PropertyDeclaration::BorderTopWidth(BorderSideWidth::Length(Length::from_px(1.))));
-            properties.push(PropertyDeclaration::BorderTopStyle(BorderStyle::solid));
+            properties.push(PropertyDeclaration::BorderTopStyle(BorderStyle::Solid));
             let c = Color::Numeric {
                 parsed: RGBA::new(255, 0, 0, 255),
                 authored: Some("green".to_string().into_boxed_str())
@@ -377,7 +389,7 @@ mod shorthand_serialization {
             properties.push(PropertyDeclaration::BorderRightColor(c.clone()));
 
             properties.push(PropertyDeclaration::BorderTopWidth(BorderSideWidth::Length(Length::from_px(1.))));
-            properties.push(PropertyDeclaration::BorderTopStyle(BorderStyle::solid));
+            properties.push(PropertyDeclaration::BorderTopStyle(BorderStyle::Solid));
             let c = Color::Numeric {
                 parsed: RGBA::new(255, 0, 0, 255),
                 authored: Some("green".to_string().into_boxed_str())
@@ -396,7 +408,7 @@ mod shorthand_serialization {
             let mut properties = Vec::new();
 
             let width = BorderSideWidth::Length(Length::from_px(4f32));
-            let style = BorderStyle::solid;
+            let style = BorderStyle::Solid;
             let color = RGBA::new(255, 0, 0, 255).into();
 
             properties.push(PropertyDeclaration::BorderTopWidth(width));
@@ -409,7 +421,7 @@ mod shorthand_serialization {
 
         fn get_border_property_values() -> (BorderSideWidth, BorderStyle, Color) {
             (BorderSideWidth::Length(Length::from_px(4f32)),
-             BorderStyle::solid,
+             BorderStyle::Solid,
              Color::currentcolor())
         }
 
@@ -492,10 +504,10 @@ mod shorthand_serialization {
         fn list_style_should_show_all_properties_when_values_are_set() {
             let mut properties = Vec::new();
 
-            let position = ListStylePosition::inside;
+            let position = ListStylePosition::Inside;
             let image =
                 ListStyleImage(Either::First(SpecifiedUrl::new_for_testing("http://servo/test.png")));
-            let style_type = ListStyleType::disc;
+            let style_type = ListStyleType::Disc;
 
             properties.push(PropertyDeclaration::ListStylePosition(position));
 
@@ -512,7 +524,7 @@ mod shorthand_serialization {
     }
 
     mod outline {
-        use style::values::Either;
+        use style::values::specified::outline::OutlineStyle;
         use super::*;
 
         #[test]
@@ -520,7 +532,7 @@ mod shorthand_serialization {
             let mut properties = Vec::new();
 
             let width = BorderSideWidth::Length(Length::from_px(4f32));
-            let style = Either::Second(BorderStyle::solid);
+            let style = OutlineStyle::Other(BorderStyle::Solid);
             let color = RGBA::new(255, 0, 0, 255).into();
 
             properties.push(PropertyDeclaration::OutlineWidth(width));
@@ -536,7 +548,7 @@ mod shorthand_serialization {
             let mut properties = Vec::new();
 
             let width = BorderSideWidth::Length(Length::from_px(4f32));
-            let style = Either::First(Auto);
+            let style = OutlineStyle::Auto;
             let color = RGBA::new(255, 0, 0, 255).into();
             properties.push(PropertyDeclaration::OutlineWidth(width));
             properties.push(PropertyDeclaration::OutlineStyle(style));
@@ -545,22 +557,6 @@ mod shorthand_serialization {
             let serialization = shorthand_properties_to_string(properties);
             assert_eq!(serialization, "outline: 4px auto rgb(255, 0, 0);");
         }
-    }
-
-    #[test]
-    fn columns_should_serialize_correctly() {
-        use style::values::{Auto, Either};
-
-        let mut properties = Vec::new();
-
-        let width = Either::Second(Auto);
-        let count = Either::Second(Auto);
-
-        properties.push(PropertyDeclaration::ColumnWidth(width));
-        properties.push(PropertyDeclaration::ColumnCount(count));
-
-        let serialization = shorthand_properties_to_string(properties);
-        assert_eq!(serialization, "columns: auto auto;");
     }
 
     #[test]
@@ -589,8 +585,8 @@ mod shorthand_serialization {
 
         let mut properties = Vec::new();
 
-        let direction = FlexDirection::row;
-        let wrap = FlexWrap::wrap;
+        let direction = FlexDirection::Row;
+        let wrap = FlexWrap::Wrap;
 
         properties.push(PropertyDeclaration::FlexDirection(direction));
         properties.push(PropertyDeclaration::FlexWrap(wrap));
@@ -725,8 +721,9 @@ mod shorthand_serialization {
 
     mod transform {
         pub use super::*;
-        use style::properties::longhands::transform::SpecifiedOperation;
+        use style::values::generics::transform::TransformOperation;
         use style::values::specified::{Angle, Number};
+        use style::values::specified::transform::TransformOperation as SpecifiedOperation;
 
         #[test]
         fn should_serialize_none_correctly() {
@@ -736,41 +733,41 @@ mod shorthand_serialization {
         }
 
         #[inline(always)]
-        fn validate_serialization<T: ToCss>(op: &T, expected_string: &'static str) {
+        fn validate_serialization(op: &SpecifiedOperation, expected_string: &'static str) {
             let css_string = op.to_css_string();
             assert_eq!(css_string, expected_string);
         }
 
         #[test]
         fn transform_scale() {
-            validate_serialization(&SpecifiedOperation::Scale(Number::new(1.3), None), "scale(1.3)");
+            validate_serialization(&TransformOperation::Scale(Number::new(1.3), None), "scale(1.3)");
             validate_serialization(
-                &SpecifiedOperation::Scale(Number::new(2.0), Some(Number::new(2.0))),
+                &TransformOperation::Scale(Number::new(2.0), Some(Number::new(2.0))),
                 "scale(2, 2)");
-            validate_serialization(&SpecifiedOperation::ScaleX(Number::new(42.0)), "scaleX(42)");
-            validate_serialization(&SpecifiedOperation::ScaleY(Number::new(0.3)), "scaleY(0.3)");
-            validate_serialization(&SpecifiedOperation::ScaleZ(Number::new(1.0)), "scaleZ(1)");
+            validate_serialization(&TransformOperation::ScaleX(Number::new(42.0)), "scaleX(42)");
+            validate_serialization(&TransformOperation::ScaleY(Number::new(0.3)), "scaleY(0.3)");
+            validate_serialization(&TransformOperation::ScaleZ(Number::new(1.0)), "scaleZ(1)");
             validate_serialization(
-                &SpecifiedOperation::Scale3D(Number::new(4.0), Number::new(5.0), Number::new(6.0)),
+                &TransformOperation::Scale3D(Number::new(4.0), Number::new(5.0), Number::new(6.0)),
                 "scale3d(4, 5, 6)");
         }
 
         #[test]
         fn transform_skew() {
             validate_serialization(
-                &SpecifiedOperation::Skew(Angle::from_degrees(42.3, false), None),
+                &TransformOperation::Skew(Angle::from_degrees(42.3, false), None),
                 "skew(42.3deg)");
             validate_serialization(
-                &SpecifiedOperation::Skew(Angle::from_gradians(-50.0, false), Some(Angle::from_turns(0.73, false))),
+                &TransformOperation::Skew(Angle::from_gradians(-50.0, false), Some(Angle::from_turns(0.73, false))),
                 "skew(-50grad, 0.73turn)");
             validate_serialization(
-                &SpecifiedOperation::SkewX(Angle::from_radians(0.31, false)), "skewX(0.31rad)");
+                &TransformOperation::SkewX(Angle::from_radians(0.31, false)), "skewX(0.31rad)");
         }
 
         #[test]
         fn transform_rotate() {
             validate_serialization(
-                &SpecifiedOperation::Rotate(Angle::from_turns(35.0, false)),
+                &TransformOperation::Rotate(Angle::from_turns(35.0, false)),
                 "rotate(35turn)"
             )
         }
@@ -1014,7 +1011,7 @@ mod shorthand_serialization {
             properties.push((CustomIdent("counter1".into()), Integer::new(1)));
             properties.push((CustomIdent("counter2".into()), Integer::new(-4)));
 
-            let counter_increment = CounterIncrement(properties);
+            let counter_increment = CounterIncrement::new(properties);
             let counter_increment_css = "counter1 1 counter2 -4";
 
             assert_eq!(counter_increment.to_css_string(), counter_increment_css);
@@ -1022,7 +1019,7 @@ mod shorthand_serialization {
 
         #[test]
         fn counter_increment_without_properties_should_serialize_correctly() {
-            let counter_increment = CounterIncrement(Vec::new());
+            let counter_increment = CounterIncrement::new(Vec::new());
             let counter_increment_css = "none";
 
             assert_eq!(counter_increment.to_css_string(), counter_increment_css);

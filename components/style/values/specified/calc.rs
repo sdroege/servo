@@ -6,11 +6,11 @@
 //!
 //! [calc]: https://drafts.csswg.org/css-values/#calc-notation
 
-use cssparser::{Parser, Token, BasicParseError};
+use cssparser::{Parser, Token, NumberOrPercentage, AngleOrNumber};
 use parser::ParserContext;
-use std::ascii::AsciiExt;
-use std::fmt;
-use style_traits::{ToCss, ParseError, StyleParseError};
+#[allow(unused_imports)] use std::ascii::AsciiExt;
+use std::fmt::{self, Write};
+use style_traits::{CssWriter, ParseError, StyleParseErrorKind, ToCss};
 use style_traits::values::specified::AllowedNumericType;
 use values::{CSSInteger, CSSFloat};
 use values::computed;
@@ -63,9 +63,12 @@ pub enum CalcUnit {
 }
 
 /// A struct to hold a simplified `<length>` or `<percentage>` expression.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+///
+/// In some cases, e.g. DOMMatrix, we support calc(), but reject all the
+/// relative lengths, and to_computed_pixel_length_without_context() handles
+/// this case. Therefore, if you want to add a new field, please make sure this
+/// function work properly.
+#[derive(Clone, Copy, Debug, Default, MallocSizeOf, PartialEq)]
 #[allow(missing_docs)]
 pub struct CalcLengthOrPercentage {
     pub clamping_mode: AllowedNumericType,
@@ -79,16 +82,17 @@ pub struct CalcLengthOrPercentage {
     pub ch: Option<CSSFloat>,
     pub rem: Option<CSSFloat>,
     pub percentage: Option<computed::Percentage>,
-    #[cfg(feature = "gecko")]
-    pub mozmm: Option<CSSFloat>,
 }
 
 impl ToCss for CalcLengthOrPercentage {
-    /// https://drafts.csswg.org/css-values/#calc-serialize
+    /// <https://drafts.csswg.org/css-values/#calc-serialize>
     ///
     /// FIXME(emilio): Should this simplify away zeros?
     #[allow(unused_assignments)]
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         use num_traits::Zero;
 
         let mut first_value = true;
@@ -144,14 +148,7 @@ impl ToCss for CalcLengthOrPercentage {
         serialize!(ch);
         serialize_abs!(Cm);
         serialize!(em, ex);
-        serialize_abs!(In);
-
-        #[cfg(feature = "gecko")]
-        {
-            serialize!(mozmm);
-        }
-
-        serialize_abs!(Mm, Pc, Pt, Px, Q);
+        serialize_abs!(In, Mm, Pc, Pt, Px, Q);
         serialize!(rem, vh, vmax, vmin, vw);
 
         dest.write_str(")")
@@ -170,6 +167,7 @@ impl CalcNode {
         input: &mut Parser<'i, 't>,
         expected_unit: CalcUnit
     ) -> Result<Self, ParseError<'i>> {
+        let location = input.current_source_location();
         // FIXME: remove early returns when lifetimes are non-lexical
         match (input.next()?, expected_unit) {
             (&Token::Number { value, .. }, _) => return Ok(CalcNode::Number(value)),
@@ -177,17 +175,17 @@ impl CalcNode {
             (&Token::Dimension { value, ref unit, .. }, CalcUnit::LengthOrPercentage) => {
                 return NoCalcLength::parse_dimension(context, value, unit)
                     .map(CalcNode::Length)
-                    .map_err(|()| StyleParseError::UnspecifiedError.into())
+                    .map_err(|()| location.new_custom_error(StyleParseErrorKind::UnspecifiedError))
             }
             (&Token::Dimension { value, ref unit, .. }, CalcUnit::Angle) => {
                 return Angle::parse_dimension(value, unit, /* from_calc = */ true)
                     .map(CalcNode::Angle)
-                    .map_err(|()| StyleParseError::UnspecifiedError.into())
+                    .map_err(|()| location.new_custom_error(StyleParseErrorKind::UnspecifiedError))
             }
             (&Token::Dimension { value, ref unit, .. }, CalcUnit::Time) => {
                 return Time::parse_dimension(value, unit, /* from_calc = */ true)
                     .map(CalcNode::Time)
-                    .map_err(|()| StyleParseError::UnspecifiedError.into())
+                    .map_err(|()| location.new_custom_error(StyleParseErrorKind::UnspecifiedError))
             }
             (&Token::Percentage { unit_value, .. }, CalcUnit::LengthOrPercentage) |
             (&Token::Percentage { unit_value, .. }, CalcUnit::Percentage) => {
@@ -195,7 +193,7 @@ impl CalcNode {
             }
             (&Token::ParenthesisBlock, _) => {}
             (&Token::Function(ref name), _) if name.eq_ignore_ascii_case("calc") => {}
-            (t, _) => return Err(BasicParseError::UnexpectedToken(t.clone()).into())
+            (t, _) => return Err(location.new_unexpected_token_error(t.clone()))
         }
         input.parse_nested_block(|i| {
             CalcNode::parse(context, i, expected_unit)
@@ -208,9 +206,8 @@ impl CalcNode {
     fn parse<'i, 't>(
         context: &ParserContext,
         input: &mut Parser<'i, 't>,
-        expected_unit: CalcUnit)
-        -> Result<Self, ParseError<'i>>
-    {
+        expected_unit: CalcUnit,
+    ) -> Result<Self, ParseError<'i>> {
         let mut root = Self::parse_product(context, input, expected_unit)?;
 
         loop {
@@ -236,7 +233,7 @@ impl CalcNode {
                                 CalcNode::Sub(Box::new(root), Box::new(rhs));
                             root = new_root;
                         }
-                        t => return Err(BasicParseError::UnexpectedToken(t).into()),
+                        t => return Err(input.new_unexpected_token_error(t)),
                     }
                 }
                 _ => {
@@ -372,7 +369,7 @@ impl CalcNode {
                                 ret.em = Some(ret.em.unwrap_or(0.) + em * factor);
                             }
                             FontRelativeLength::Ex(ex) => {
-                                ret.ex = Some(ret.em.unwrap_or(0.) + ex * factor);
+                                ret.ex = Some(ret.ex.unwrap_or(0.) + ex * factor);
                             }
                             FontRelativeLength::Ch(ch) => {
                                 ret.ch = Some(ret.ch.unwrap_or(0.) + ch * factor);
@@ -399,10 +396,6 @@ impl CalcNode {
                         }
                     }
                     NoCalcLength::ServoCharacterWidth(..) => unreachable!(),
-                    #[cfg(feature = "gecko")]
-                    NoCalcLength::Physical(physical) => {
-                        ret.mozmm = Some(ret.mozmm.unwrap_or(0.) + physical.0 * factor);
-                    }
                 }
             }
             CalcNode::Sub(ref a, ref b) => {
@@ -559,7 +552,7 @@ impl CalcNode {
         Self::parse(context, input, CalcUnit::Integer)?
             .to_number()
             .map(|n| n as CSSInteger)
-            .map_err(|()| StyleParseError::UnspecifiedError.into())
+            .map_err(|()| input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
     }
 
     /// Convenience parsing function for `<length> | <percentage>`.
@@ -570,7 +563,7 @@ impl CalcNode {
     ) -> Result<CalcLengthOrPercentage, ParseError<'i>> {
         Self::parse(context, input, CalcUnit::LengthOrPercentage)?
             .to_length_or_percentage(clamping_mode)
-            .map_err(|()| StyleParseError::UnspecifiedError.into())
+            .map_err(|()| input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
     }
 
     /// Convenience parsing function for percentages.
@@ -580,7 +573,7 @@ impl CalcNode {
     ) -> Result<CSSFloat, ParseError<'i>> {
         Self::parse(context, input, CalcUnit::Percentage)?
             .to_percentage()
-            .map_err(|()| StyleParseError::UnspecifiedError.into())
+            .map_err(|()| input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
     }
 
     /// Convenience parsing function for `<length>`.
@@ -591,7 +584,7 @@ impl CalcNode {
     ) -> Result<CalcLengthOrPercentage, ParseError<'i>> {
         Self::parse(context, input, CalcUnit::Length)?
             .to_length_or_percentage(clamping_mode)
-            .map_err(|()| StyleParseError::UnspecifiedError.into())
+            .map_err(|()| input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
     }
 
     /// Convenience parsing function for `<number>`.
@@ -601,7 +594,7 @@ impl CalcNode {
     ) -> Result<CSSFloat, ParseError<'i>> {
         Self::parse(context, input, CalcUnit::Number)?
             .to_number()
-            .map_err(|()| StyleParseError::UnspecifiedError.into())
+            .map_err(|()| input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
     }
 
     /// Convenience parsing function for `<angle>`.
@@ -611,7 +604,7 @@ impl CalcNode {
     ) -> Result<Angle, ParseError<'i>> {
         Self::parse(context, input, CalcUnit::Angle)?
             .to_angle()
-            .map_err(|()| StyleParseError::UnspecifiedError.into())
+            .map_err(|()| input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
     }
 
     /// Convenience parsing function for `<time>`.
@@ -621,6 +614,41 @@ impl CalcNode {
     ) -> Result<Time, ParseError<'i>> {
         Self::parse(context, input, CalcUnit::Time)?
             .to_time()
-            .map_err(|()| StyleParseError::UnspecifiedError.into())
+            .map_err(|()| input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
+    }
+
+    /// Convenience parsing function for `<number>` or `<percentage>`.
+    pub fn parse_number_or_percentage<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>
+    ) -> Result<NumberOrPercentage, ParseError<'i>> {
+        let node = Self::parse(context, input, CalcUnit::Percentage)?;
+
+        if let Ok(value) = node.to_number() {
+            return Ok(NumberOrPercentage::Number { value })
+        }
+
+        match node.to_percentage() {
+            Ok(unit_value) => Ok(NumberOrPercentage::Percentage { unit_value }),
+            Err(()) => Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError)),
+        }
+    }
+
+    /// Convenience parsing function for `<number>` or `<angle>`.
+    pub fn parse_angle_or_number<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>
+    ) -> Result<AngleOrNumber, ParseError<'i>> {
+        let node = Self::parse(context, input, CalcUnit::Angle)?;
+
+        if let Ok(angle) = node.to_angle() {
+            let degrees = angle.degrees();
+            return Ok(AngleOrNumber::Angle { degrees })
+        }
+
+        match node.to_number() {
+            Ok(value) => Ok(AngleOrNumber::Number { value }),
+            Err(()) => Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError)),
+        }
     }
 }

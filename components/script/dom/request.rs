@@ -15,7 +15,6 @@ use dom::bindings::codegen::Bindings::RequestBinding::RequestInit;
 use dom::bindings::codegen::Bindings::RequestBinding::RequestMethods;
 use dom::bindings::codegen::Bindings::RequestBinding::RequestMode;
 use dom::bindings::codegen::Bindings::RequestBinding::RequestRedirect;
-use dom::bindings::codegen::Bindings::RequestBinding::RequestType;
 use dom::bindings::error::{Error, Fallible};
 use dom::bindings::reflector::{DomObject, Reflector, reflect_dom_object};
 use dom::bindings::root::{DomRoot, MutNullableDom};
@@ -36,7 +35,6 @@ use net_traits::request::RedirectMode as NetTraitsRequestRedirect;
 use net_traits::request::Referrer as NetTraitsRequestReferrer;
 use net_traits::request::Request as NetTraitsRequest;
 use net_traits::request::RequestMode as NetTraitsRequestMode;
-use net_traits::request::Type as NetTraitsRequestType;
 use servo_url::ServoUrl;
 use std::cell::{Cell, Ref};
 use std::rc::Rc;
@@ -48,7 +46,7 @@ pub struct Request {
     body_used: Cell<bool>,
     headers: MutNullableDom<Headers>,
     mime_type: DomRefCell<Vec<u8>>,
-    #[ignore_heap_size_of = "Rc"]
+    #[ignore_malloc_size_of = "Rc"]
     body_promise: DomRefCell<Option<(Rc<Promise>, BodyType)>>,
 }
 
@@ -68,8 +66,7 @@ impl Request {
 
     pub fn new(global: &GlobalScope,
                url: ServoUrl) -> DomRoot<Request> {
-        reflect_dom_object(box Request::new_inherited(global,
-                                                      url),
+        reflect_dom_object(Box::new(Request::new_inherited(global, url)),
                            global, RequestBinding::Wrap)
     }
 
@@ -342,6 +339,9 @@ impl Request {
             _ => {},
         }
 
+        // Copy the headers list onto the headers of net_traits::Request
+        r.request.borrow_mut().headers = r.Headers().get_headers_list();
+
         // Step 32
         let mut input_body = if let RequestInfo::Request(ref input_request) = input {
             let input_request_request = input_request.request.borrow();
@@ -462,17 +462,7 @@ fn normalize_method(m: &str) -> HttpMethod {
 
 // https://fetch.spec.whatwg.org/#concept-method
 fn is_method(m: &ByteString) -> bool {
-    match m.to_lower().as_str() {
-        Some("get") => true,
-        Some("head") => true,
-        Some("post") => true,
-        Some("put") => true,
-        Some("delete") => true,
-        Some("connect") => true,
-        Some("options") => true,
-        Some("trace") => true,
-        _ => false,
-    }
+    m.as_str().is_some()
 }
 
 // https://fetch.spec.whatwg.org/#forbidden-method
@@ -527,11 +517,6 @@ impl RequestMethods for Request {
         self.headers.or_init(|| Headers::new(&self.global()))
     }
 
-    // https://fetch.spec.whatwg.org/#dom-request-type
-    fn Type(&self) -> RequestType {
-        self.request.borrow().type_.into()
-    }
-
     // https://fetch.spec.whatwg.org/#dom-request-destination
     fn Destination(&self) -> RequestDestination {
         self.request.borrow().destination.into()
@@ -557,7 +542,7 @@ impl RequestMethods for Request {
 
     // https://fetch.spec.whatwg.org/#dom-request-mode
     fn Mode(&self) -> RequestMode {
-        self.request.borrow().mode.into()
+        self.request.borrow().mode.clone().into()
     }
 
     // https://fetch.spec.whatwg.org/#dom-request-credentials
@@ -704,20 +689,21 @@ impl Into<NetTraitsRequestDestination> for RequestDestination {
     fn into(self) -> NetTraitsRequestDestination {
         match self {
             RequestDestination::_empty => NetTraitsRequestDestination::None,
+            RequestDestination::Audio => NetTraitsRequestDestination::Audio,
             RequestDestination::Document => NetTraitsRequestDestination::Document,
             RequestDestination::Embed => NetTraitsRequestDestination::Embed,
             RequestDestination::Font => NetTraitsRequestDestination::Font,
             RequestDestination::Image => NetTraitsRequestDestination::Image,
             RequestDestination::Manifest => NetTraitsRequestDestination::Manifest,
-            RequestDestination::Media => NetTraitsRequestDestination::Media,
             RequestDestination::Object => NetTraitsRequestDestination::Object,
             RequestDestination::Report => NetTraitsRequestDestination::Report,
             RequestDestination::Script => NetTraitsRequestDestination::Script,
-            RequestDestination::Serviceworker => NetTraitsRequestDestination::ServiceWorker,
             RequestDestination::Sharedworker => NetTraitsRequestDestination::SharedWorker,
             RequestDestination::Style => NetTraitsRequestDestination::Style,
+            RequestDestination::Track => NetTraitsRequestDestination::Track,
+            RequestDestination::Video => NetTraitsRequestDestination::Video,
             RequestDestination::Worker => NetTraitsRequestDestination::Worker,
-            RequestDestination::Xslt => NetTraitsRequestDestination::XSLT,
+            RequestDestination::Xslt => NetTraitsRequestDestination::Xslt,
         }
     }
 }
@@ -726,50 +712,23 @@ impl Into<RequestDestination> for NetTraitsRequestDestination {
     fn into(self) -> RequestDestination {
         match self {
             NetTraitsRequestDestination::None => RequestDestination::_empty,
+            NetTraitsRequestDestination::Audio => RequestDestination::Audio,
             NetTraitsRequestDestination::Document => RequestDestination::Document,
             NetTraitsRequestDestination::Embed => RequestDestination::Embed,
             NetTraitsRequestDestination::Font => RequestDestination::Font,
             NetTraitsRequestDestination::Image => RequestDestination::Image,
             NetTraitsRequestDestination::Manifest => RequestDestination::Manifest,
-            NetTraitsRequestDestination::Media => RequestDestination::Media,
             NetTraitsRequestDestination::Object => RequestDestination::Object,
             NetTraitsRequestDestination::Report => RequestDestination::Report,
             NetTraitsRequestDestination::Script => RequestDestination::Script,
-            NetTraitsRequestDestination::ServiceWorker => RequestDestination::Serviceworker,
+            NetTraitsRequestDestination::ServiceWorker
+                => panic!("ServiceWorker request destination should not be exposed to DOM"),
             NetTraitsRequestDestination::SharedWorker => RequestDestination::Sharedworker,
             NetTraitsRequestDestination::Style => RequestDestination::Style,
-            NetTraitsRequestDestination::XSLT => RequestDestination::Xslt,
+            NetTraitsRequestDestination::Track => RequestDestination::Track,
+            NetTraitsRequestDestination::Video => RequestDestination::Video,
             NetTraitsRequestDestination::Worker => RequestDestination::Worker,
-        }
-    }
-}
-
-impl Into<NetTraitsRequestType> for RequestType {
-    fn into(self) -> NetTraitsRequestType {
-        match self {
-            RequestType::_empty => NetTraitsRequestType::None,
-            RequestType::Audio => NetTraitsRequestType::Audio,
-            RequestType::Font => NetTraitsRequestType::Font,
-            RequestType::Image => NetTraitsRequestType::Image,
-            RequestType::Script => NetTraitsRequestType::Script,
-            RequestType::Style => NetTraitsRequestType::Style,
-            RequestType::Track => NetTraitsRequestType::Track,
-            RequestType::Video => NetTraitsRequestType::Video,
-        }
-    }
-}
-
-impl Into<RequestType> for NetTraitsRequestType {
-    fn into(self) -> RequestType {
-        match self {
-            NetTraitsRequestType::None => RequestType::_empty,
-            NetTraitsRequestType::Audio => RequestType::Audio,
-            NetTraitsRequestType::Font => RequestType::Font,
-            NetTraitsRequestType::Image => RequestType::Image,
-            NetTraitsRequestType::Script => RequestType::Script,
-            NetTraitsRequestType::Style => RequestType::Style,
-            NetTraitsRequestType::Track => RequestType::Track,
-            NetTraitsRequestType::Video => RequestType::Video,
+            NetTraitsRequestDestination::Xslt => RequestDestination::Xslt,
         }
     }
 }
@@ -792,7 +751,8 @@ impl Into<RequestMode> for NetTraitsRequestMode {
             NetTraitsRequestMode::SameOrigin => RequestMode::Same_origin,
             NetTraitsRequestMode::NoCors => RequestMode::No_cors,
             NetTraitsRequestMode::CorsMode => RequestMode::Cors,
-            NetTraitsRequestMode::WebSocket => unreachable!("Websocket request mode should never be exposed to Dom"),
+            NetTraitsRequestMode::WebSocket { .. } =>
+                unreachable!("Websocket request mode should never be exposed to Dom"),
         }
     }
 }

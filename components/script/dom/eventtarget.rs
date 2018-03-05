@@ -15,25 +15,26 @@ use dom::bindings::codegen::Bindings::EventListenerBinding::EventListener;
 use dom::bindings::codegen::Bindings::EventTargetBinding::AddEventListenerOptions;
 use dom::bindings::codegen::Bindings::EventTargetBinding::EventListenerOptions;
 use dom::bindings::codegen::Bindings::EventTargetBinding::EventTargetMethods;
+use dom::bindings::codegen::Bindings::EventTargetBinding::Wrap;
 use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::codegen::UnionTypes::AddEventListenerOptionsOrBoolean;
 use dom::bindings::codegen::UnionTypes::EventListenerOptionsOrBoolean;
 use dom::bindings::codegen::UnionTypes::EventOrString;
 use dom::bindings::error::{Error, Fallible, report_pending_exception};
 use dom::bindings::inheritance::Castable;
-use dom::bindings::reflector::{DomObject, Reflector};
+use dom::bindings::reflector::{DomObject, Reflector, reflect_dom_object};
 use dom::bindings::root::DomRoot;
 use dom::bindings::str::DOMString;
 use dom::element::Element;
 use dom::errorevent::ErrorEvent;
 use dom::event::{Event, EventBubbles, EventCancelable, EventStatus};
+use dom::globalscope::GlobalScope;
 use dom::node::document_from_node;
 use dom::virtualmethods::VirtualMethods;
 use dom::window::Window;
 use dom_struct::dom_struct;
 use fnv::FnvHasher;
-use heapsize::HeapSizeOf;
-use js::jsapi::{CompileFunction, JS_GetFunctionObject, JSAutoCompartment};
+use js::jsapi::{CompileFunction, JS_GetFunctionObject, JSAutoCompartment, JSFunction};
 use js::rust::{AutoObjectVectorWrapper, CompileOptionsWrapper};
 use libc::{c_char, size_t};
 use servo_atoms::Atom;
@@ -48,11 +49,19 @@ use std::ops::{Deref, DerefMut};
 use std::ptr;
 use std::rc::Rc;
 
-#[derive(Clone, JSTraceable, PartialEq)]
+#[derive(Clone, JSTraceable, MallocSizeOf, PartialEq)]
 pub enum CommonEventHandler {
-    EventHandler(Rc<EventHandlerNonNull>),
-    ErrorEventHandler(Rc<OnErrorEventHandlerNonNull>),
-    BeforeUnloadEventHandler(Rc<OnBeforeUnloadEventHandlerNonNull>),
+    EventHandler(
+        #[ignore_malloc_size_of = "Rc"]
+        Rc<EventHandlerNonNull>),
+
+    ErrorEventHandler(
+        #[ignore_malloc_size_of = "Rc"]
+        Rc<OnErrorEventHandlerNonNull>),
+
+    BeforeUnloadEventHandler(
+        #[ignore_malloc_size_of = "Rc"]
+        Rc<OnBeforeUnloadEventHandlerNonNull>),
 }
 
 impl CommonEventHandler {
@@ -65,14 +74,14 @@ impl CommonEventHandler {
     }
 }
 
-#[derive(Clone, Copy, HeapSizeOf, JSTraceable, PartialEq)]
+#[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
 pub enum ListenerPhase {
     Capturing,
     Bubbling,
 }
 
-/// https://html.spec.whatwg.org/multipage/#internal-raw-uncompiled-handler
-#[derive(Clone, JSTraceable, PartialEq)]
+/// <https://html.spec.whatwg.org/multipage/#internal-raw-uncompiled-handler>
+#[derive(Clone, JSTraceable, MallocSizeOf, PartialEq)]
 struct InternalRawUncompiledHandler {
     source: DOMString,
     url: ServoUrl,
@@ -80,7 +89,7 @@ struct InternalRawUncompiledHandler {
 }
 
 /// A representation of an event handler, either compiled or uncompiled raw source, or null.
-#[derive(Clone, JSTraceable, PartialEq)]
+#[derive(Clone, JSTraceable, MallocSizeOf, PartialEq)]
 enum InlineEventListener {
     Uncompiled(InternalRawUncompiledHandler),
     Compiled(CommonEventHandler),
@@ -90,7 +99,7 @@ enum InlineEventListener {
 impl InlineEventListener {
     /// Get a compiled representation of this event handler, compiling it from its
     /// raw source if necessary.
-    /// https://html.spec.whatwg.org/multipage/#getting-the-current-value-of-the-event-handler
+    /// <https://html.spec.whatwg.org/multipage/#getting-the-current-value-of-the-event-handler>
     fn get_compiled_handler(&mut self, owner: &EventTarget, ty: &Atom)
                             -> Option<CommonEventHandler> {
         match mem::replace(self, InlineEventListener::Null) {
@@ -110,17 +119,10 @@ impl InlineEventListener {
     }
 }
 
-#[derive(Clone, JSTraceable, PartialEq)]
+#[derive(Clone, JSTraceable, MallocSizeOf, PartialEq)]
 enum EventListenerType {
-    Additive(Rc<EventListener>),
+    Additive(#[ignore_malloc_size_of = "Rc"] Rc<EventListener>),
     Inline(InlineEventListener),
-}
-
-impl HeapSizeOf for EventListenerType {
-    fn heap_size_of_children(&self) -> usize {
-        // FIXME: Rc<T> isn't HeapSizeOf and we can't ignore it due to #6870 and #6871
-        0
-    }
 }
 
 impl EventListenerType {
@@ -225,14 +227,14 @@ impl CompiledEventListener {
     }
 }
 
-#[derive(Clone, DenyPublicFields, HeapSizeOf, JSTraceable, PartialEq)]
+#[derive(Clone, DenyPublicFields, JSTraceable, MallocSizeOf, PartialEq)]
 /// A listener in a collection of event listeners.
 struct EventListenerEntry {
     phase: ListenerPhase,
     listener: EventListenerType
 }
 
-#[derive(HeapSizeOf, JSTraceable)]
+#[derive(JSTraceable, MallocSizeOf)]
 /// A mix of potentially uncompiled and compiled event listeners of the same type.
 struct EventListeners(Vec<EventListenerEntry>);
 
@@ -291,6 +293,16 @@ impl EventTarget {
         }
     }
 
+    fn new(global: &GlobalScope) -> DomRoot<EventTarget> {
+        reflect_dom_object(Box::new(EventTarget::new_inherited()),
+                           global,
+                           Wrap)
+    }
+
+    pub fn Constructor(global: &GlobalScope) -> Fallible<DomRoot<EventTarget>> {
+        Ok(EventTarget::new(global))
+    }
+
     pub fn get_listeners_for(&self,
                              type_: &Atom,
                              specific_phase: Option<ListenerPhase>)
@@ -303,10 +315,21 @@ impl EventTarget {
     pub fn dispatch_event_with_target(&self,
                                       target: &EventTarget,
                                       event: &Event) -> EventStatus {
+        if let Some(window) = target.global().downcast::<Window>() {
+            if window.has_document() {
+                assert!(window.Document().can_invoke_script());
+            }
+        };
+
         event.dispatch(self, Some(target))
     }
 
     pub fn dispatch_event(&self, event: &Event) -> EventStatus {
+        if let Some(window) = self.global().downcast::<Window>() {
+            if window.has_document() {
+                assert!(window.Document().can_invoke_script());
+            }
+        };
         event.dispatch(self, None)
     }
 
@@ -314,7 +337,7 @@ impl EventTarget {
         *self.handlers.borrow_mut() = Default::default();
     }
 
-    /// https://html.spec.whatwg.org/multipage/#event-handler-attributes:event-handlers-11
+    /// <https://html.spec.whatwg.org/multipage/#event-handler-attributes:event-handlers-11>
     fn set_inline_event_listener(&self,
                                  ty: Atom,
                                  listener: Option<InlineEventListener>) {
@@ -353,7 +376,7 @@ impl EventTarget {
     }
 
     /// Store the raw uncompiled event handler for on-demand compilation later.
-    /// https://html.spec.whatwg.org/multipage/#event-handler-attributes:event-handler-content-attributes-3
+    /// <https://html.spec.whatwg.org/multipage/#event-handler-attributes:event-handler-content-attributes-3>
     pub fn set_event_handler_uncompiled(&self,
                                         url: ServoUrl,
                                         line: usize,
@@ -420,7 +443,7 @@ impl EventTarget {
         let scopechain = AutoObjectVectorWrapper::new(cx);
 
         let _ac = JSAutoCompartment::new(cx, window.reflector().get_jsobject().get());
-        rooted!(in(cx) let mut handler = ptr::null_mut());
+        rooted!(in(cx) let mut handler = ptr::null_mut::<JSFunction>());
         let rv = unsafe {
             CompileFunction(cx,
                             scopechain.ptr,
@@ -448,50 +471,76 @@ impl EventTarget {
         assert!(!funobj.is_null());
         // Step 1.14
         if is_error {
-            Some(CommonEventHandler::ErrorEventHandler(OnErrorEventHandlerNonNull::new(cx, funobj)))
+            Some(CommonEventHandler::ErrorEventHandler(
+                unsafe { OnErrorEventHandlerNonNull::new(cx, funobj) },
+            ))
         } else {
             if ty == &atom!("beforeunload") {
                 Some(CommonEventHandler::BeforeUnloadEventHandler(
-                        OnBeforeUnloadEventHandlerNonNull::new(cx, funobj)))
+                    unsafe { OnBeforeUnloadEventHandlerNonNull::new(cx, funobj) },
+                ))
             } else {
-                Some(CommonEventHandler::EventHandler(EventHandlerNonNull::new(cx, funobj)))
+                Some(CommonEventHandler::EventHandler(
+                    unsafe { EventHandlerNonNull::new(cx, funobj) },
+                ))
             }
         }
     }
 
+    #[allow(unsafe_code)]
     pub fn set_event_handler_common<T: CallbackContainer>(
-        &self, ty: &str, listener: Option<Rc<T>>)
+        &self,
+        ty: &str,
+        listener: Option<Rc<T>>,
+    )
+    where
+        T: CallbackContainer,
     {
         let cx = self.global().get_cx();
 
-        let event_listener = listener.map(|listener|
-                                          InlineEventListener::Compiled(
-                                              CommonEventHandler::EventHandler(
-                                                  EventHandlerNonNull::new(cx, listener.callback()))));
+        let event_listener = listener.map(|listener| {
+            InlineEventListener::Compiled(CommonEventHandler::EventHandler(
+                unsafe { EventHandlerNonNull::new(cx, listener.callback()) },
+            ))
+        });
         self.set_inline_event_listener(Atom::from(ty), event_listener);
     }
 
+    #[allow(unsafe_code)]
     pub fn set_error_event_handler<T: CallbackContainer>(
-        &self, ty: &str, listener: Option<Rc<T>>)
+        &self,
+        ty: &str,
+        listener: Option<Rc<T>>,
+    )
+    where
+        T: CallbackContainer,
     {
         let cx = self.global().get_cx();
 
-        let event_listener = listener.map(|listener|
-                                          InlineEventListener::Compiled(
-                                              CommonEventHandler::ErrorEventHandler(
-                                                  OnErrorEventHandlerNonNull::new(cx, listener.callback()))));
+        let event_listener = listener.map(|listener| {
+            InlineEventListener::Compiled(CommonEventHandler::ErrorEventHandler(
+                unsafe { OnErrorEventHandlerNonNull::new(cx, listener.callback()) }
+            ))
+        });
         self.set_inline_event_listener(Atom::from(ty), event_listener);
     }
 
-    pub fn set_beforeunload_event_handler<T: CallbackContainer>(&self, ty: &str,
-                                                                listener: Option<Rc<T>>) {
+    #[allow(unsafe_code)]
+    pub fn set_beforeunload_event_handler<T: CallbackContainer>(
+        &self,
+        ty: &str,
+        listener: Option<Rc<T>>,
+    )
+    where
+        T: CallbackContainer,
+    {
         let cx = self.global().get_cx();
 
-        let event_listener = listener.map(|listener|
-            InlineEventListener::Compiled(
-                CommonEventHandler::BeforeUnloadEventHandler(
-                    OnBeforeUnloadEventHandlerNonNull::new(cx, listener.callback())))
-        );
+        let event_listener = listener.map(|listener| {
+            InlineEventListener::Compiled(CommonEventHandler::BeforeUnloadEventHandler(
+                unsafe { OnBeforeUnloadEventHandlerNonNull::new(cx, listener.callback()) }
+            ))
+        });
         self.set_inline_event_listener(Atom::from(ty), event_listener);
     }
 

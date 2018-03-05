@@ -9,15 +9,14 @@ use IFrameLoadInfo;
 use IFrameLoadInfoWithData;
 use LayoutControlMsg;
 use LoadData;
-use MozBrowserEvent;
 use WorkerGlobalScopeInit;
 use WorkerScriptLoadOrigin;
 use canvas_traits::canvas::CanvasMsg;
 use devtools_traits::{ScriptToDevtoolsControlMsg, WorkerId};
 use euclid::{Point2D, Size2D, TypedSize2D};
 use gfx_traits::Epoch;
-use ipc_channel::ipc::IpcSender;
-use msg::constellation_msg::{BrowsingContextId, FrameType, PipelineId, TraversalDirection};
+use ipc_channel::ipc::{IpcReceiver, IpcSender};
+use msg::constellation_msg::{BrowsingContextId, PipelineId, TraversalDirection};
 use msg::constellation_msg::{Key, KeyModifiers, KeyState};
 use net_traits::CoreResourceMsg;
 use net_traits::request::RequestInit;
@@ -25,9 +24,8 @@ use net_traits::storage_thread::StorageType;
 use servo_url::ImmutableOrigin;
 use servo_url::ServoUrl;
 use style_traits::CSSPixel;
-use style_traits::cursor::Cursor;
+use style_traits::cursor::CursorKind;
 use style_traits::viewport::ViewportConstraints;
-use webrender_api::ClipId;
 
 /// Messages from the layout to the constellation.
 #[derive(Deserialize, Serialize)]
@@ -40,7 +38,7 @@ pub enum LayoutMsg {
     /// the time when the frame with the given ID (epoch) is painted.
     PendingPaintMetric(PipelineId, Epoch),
     /// Requests that the constellation inform the compositor of the a cursor change.
-    SetCursor(Cursor),
+    SetCursor(CursorKind),
     /// Notifies the constellation that the viewport has been constrained in some manner
     ViewportConstrained(PipelineId, ViewportConstraints),
 }
@@ -72,7 +70,7 @@ pub enum LogEntry {
 pub enum ScriptMsg {
     /// Requests are sent to constellation and fetches are checked manually
     /// for cross-origin loads
-    InitiateNavigateRequest(RequestInit),
+    InitiateNavigateRequest(RequestInit, /* cancellation_chan */ IpcReceiver<()>),
     /// Broadcast a storage event to every same-origin pipeline.
     /// The strings are key, old value and new value.
     BroadcastStorageEvent(StorageType, ServoUrl, Option<String>, Option<String>, Option<String>),
@@ -90,7 +88,7 @@ pub enum ScriptMsg {
     /// Get the browsing context id for a given pipeline.
     GetBrowsingContextId(PipelineId, IpcSender<Option<BrowsingContextId>>),
     /// Get the parent info for a given pipeline.
-    GetParentInfo(PipelineId, IpcSender<Option<(PipelineId, FrameType)>>),
+    GetParentInfo(PipelineId, IpcSender<Option<PipelineId>>),
     /// <head> tag finished parsing
     HeadParsed,
     /// All pending loads are complete, and the `load` event for this pipeline
@@ -103,8 +101,6 @@ pub enum ScriptMsg {
     AbortLoadUrl,
     /// Post a message to the currently active window of a given browsing context.
     PostMessage(BrowsingContextId, Option<ImmutableOrigin>, Vec<u8>),
-    /// Dispatch a mozbrowser event to the parent of a mozbrowser iframe.
-    MozBrowserEvent(PipelineId, MozBrowserEvent),
     /// HTMLIFrameElement Forward or Back traversal.
     TraverseHistory(TraversalDirection),
     /// Gets the length of the joint session history from the constellation.
@@ -134,10 +130,8 @@ pub enum ScriptMsg {
     SetFinalUrl(ServoUrl),
     /// Check if an alert dialog box should be presented
     Alert(String, IpcSender<bool>),
-    /// Scroll a page in a window
-    ScrollFragmentPoint(ClipId, Point2D<f32>, bool),
     /// Set title of current page
-    /// https://html.spec.whatwg.org/multipage/#document.title
+    /// <https://html.spec.whatwg.org/multipage/#document.title>
     SetTitle(Option<String>),
     /// Send a key event
     SendKeyEvent(Option<char>, Key, KeyState, KeyModifiers),
@@ -160,6 +154,10 @@ pub enum ScriptMsg {
     RegisterServiceWorker(ScopeThings, ServoUrl),
     /// Enter or exit fullscreen
     SetFullscreenState(bool),
+    /// Get the screen size (pixel)
+    GetScreenSize(IpcSender<(Size2D<u32>)>),
+    /// Get the available screen size (pixel)
+    GetScreenAvailSize(IpcSender<(Size2D<u32>)>),
     /// Requests that the compositor shut down.
     Exit,
 }

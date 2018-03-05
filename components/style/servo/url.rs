@@ -6,12 +6,12 @@
 
 use parser::ParserContext;
 use servo_url::ServoUrl;
-use std::fmt;
+use std::fmt::{self, Write};
 // Note: We use std::sync::Arc rather than servo_arc::Arc here because the
 // nonzero optimization is important in keeping the size of SpecifiedUrl below
 // the threshold.
 use std::sync::Arc;
-use style_traits::{ToCss, ParseError};
+use style_traits::{CssWriter, ParseError, ToCss};
 use values::computed::{Context, ToComputedValue, ComputedUrl};
 
 /// A specified url() value for servo.
@@ -21,8 +21,8 @@ use values::computed::{Context, ToComputedValue, ComputedUrl};
 /// eagerly resolving with rust-url would be duplicated work.
 ///
 /// However, this approach is still not necessarily optimal: See
-/// https://bugzilla.mozilla.org/show_bug.cgi?id=1347435#c6
-#[derive(Clone, Debug, Deserialize, HeapSizeOf, Serialize)]
+/// <https://bugzilla.mozilla.org/show_bug.cgi?id=1347435#c6>
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct SpecifiedUrl {
     /// The original URI. This might be optional since we may insert computed
     /// values of images into the cascade directly, and we don't bother to
@@ -30,6 +30,7 @@ pub struct SpecifiedUrl {
     ///
     /// Refcounted since cloning this should be cheap and data: uris can be
     /// really large.
+    #[ignore_malloc_size_of = "Arc"]
     original: Option<Arc<String>>,
 
     /// The resolved value for the url, if valid.
@@ -110,7 +111,10 @@ impl PartialEq for SpecifiedUrl {
 }
 
 impl ToCss for SpecifiedUrl {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         let string = match self.original {
             Some(ref original) => &**original,
             None => match self.resolved {

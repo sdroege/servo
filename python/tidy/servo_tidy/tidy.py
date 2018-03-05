@@ -17,13 +17,24 @@ import re
 import StringIO
 import subprocess
 import sys
+
 import colorama
 import toml
+import voluptuous
 import yaml
-
 from licenseck import MPL, APACHE, COPYRIGHT, licenses_toml, licenses_dep_toml
+topdir = os.path.abspath(os.path.dirname(sys.argv[0]))
+wpt = os.path.join(topdir, "tests", "wpt")
+
+
+def wpt_path(*args):
+    return os.path.join(wpt, *args)
+
+sys.path.append(wpt_path("web-platform-tests", "tools", "wptrunner", "wptrunner"))
+from wptmanifest import parser, node
 
 CONFIG_FILE_PATH = os.path.join(".", "servo-tidy.toml")
+WPT_MANIFEST_PATH = wpt_path("include.ini")
 
 # Default configs
 config = {
@@ -53,7 +64,7 @@ FILE_PATTERNS_TO_CHECK = ["*.rs", "*.rc", "*.cpp", "*.c",
                           "*.yml"]
 
 # File patterns that are ignored for all tidy and lint checks.
-FILE_PATTERNS_TO_IGNORE = ["*.#*", "*.pyc", "fake-ld.sh"]
+FILE_PATTERNS_TO_IGNORE = ["*.#*", "*.pyc", "fake-ld.sh", "*.ogv", "*.webm"]
 
 SPEC_BASE_PATH = "components/script/dom/"
 
@@ -66,7 +77,6 @@ WEBIDL_STANDARDS = [
     "//dev.w3.org/fxtf",
     "//dvcs.w3.org/hg",
     "//dom.spec.whatwg.org",
-    "//domparsing.spec.whatwg.org",
     "//drafts.csswg.org",
     "//drafts.css-houdini.org",
     "//drafts.fxtf.org",
@@ -317,7 +327,7 @@ def check_flake8(file_name, contents):
 
 def check_lock(file_name, contents):
     def find_reverse_dependencies(name, content):
-        for package in itertools.chain([content["root"]], content["package"]):
+        for package in itertools.chain([content.get("root", {})], content["package"]):
             for dependency in package.get("dependencies", []):
                 if dependency.startswith("{} ".format(name)):
                     yield package["name"], dependency
@@ -340,10 +350,17 @@ def check_lock(file_name, contents):
         packages_by_name.setdefault(package["name"], []).append((package["version"], source))
 
     for (name, packages) in packages_by_name.iteritems():
-        if name in exceptions or len(packages) <= 1:
+        has_duplicates = len(packages) > 1
+        duplicates_allowed = name in exceptions
+
+        if has_duplicates == duplicates_allowed:
             continue
 
-        message = "duplicate versions for package `{}`".format(name)
+        if duplicates_allowed:
+            message = 'duplicates for `{}` are allowed, but only single version found'.format(name)
+        else:
+            message = "duplicate versions for package `{}`".format(name)
+
         packages.sort()
         packages_dependencies = list(find_reverse_dependencies(name, content))
         for version, source in packages:
@@ -430,6 +447,38 @@ def check_shell(file_name, lines):
                 next_char = stripped[next_idx]
                 if not (next_char == '{' or next_char == '('):
                     yield(idx + 1, "variable substitutions should use the full \"${VAR}\" form")
+
+
+def rec_parse(current_path, root_node):
+    dirs = []
+    for item in root_node.children:
+        if isinstance(item, node.DataNode):
+            next_depth = os.path.join(current_path, item.data)
+            dirs.append(next_depth)
+            dirs += rec_parse(next_depth, item)
+    return dirs
+
+
+def check_manifest_dirs(config_file, print_text=True):
+    if not os.path.exists(config_file):
+        yield(config_file, 0, "%s manifest file is required but was not found" % config_file)
+        return
+
+    # Load configs from include.ini
+    with open(config_file) as content:
+        conf_file = content.read()
+        lines = conf_file.splitlines(True)
+
+    if print_text:
+        print '\rChecking the wpt manifest file...'
+
+    p = parser.parse(lines)
+    paths = rec_parse(wpt_path("web-platform-tests"), p)
+    for idx, path in enumerate(paths):
+        if path.endswith("_mozilla"):
+            continue
+        if not os.path.isdir(path):
+            yield(config_file, idx + 1, "Path in manifest was not found: {}".format(path))
 
 
 def check_rust(file_name, lines):
@@ -627,6 +676,10 @@ def check_rust(file_name, lines):
                       + decl_found.format(crate_name))
             prev_crate[indent] = crate_name
 
+        if line == "}":
+            for i in [i for i in prev_crate.keys() if i > indent]:
+                del prev_crate[i]
+
         # check alphabetical order of feature attributes in lib.rs files
         if is_lib_rs_file:
             match = re.search(r"#!\[feature\((.*)\)\]", line)
@@ -765,15 +818,24 @@ def duplicate_key_yaml_constructor(loader, node, deep=False):
 
 
 def lint_buildbot_steps_yaml(mapping):
-    # Check for well-formedness of contents
-    # A well-formed buildbot_steps.yml should be a map to list of strings
-    for k in mapping.keys():
-        if not isinstance(mapping[k], list):
-            raise ValueError("Key '{}' maps to type '{}', but list expected".format(k, type(mapping[k]).__name__))
+    from voluptuous import Any, Extra, Required, Schema
 
-        # check if value is a list of strings
-        for item in itertools.ifilter(lambda i: not isinstance(i, str), mapping[k]):
-            raise ValueError("List mapped to '{}' contains non-string element".format(k))
+    # Note: dictionary keys are optional by default in voluptuous
+    env = Schema({Extra: str})
+    commands = Schema([str])
+    schema = Schema({
+        'env': env,
+        Extra: Any(
+            commands,
+            {
+                'env': env,
+                Required('commands'): commands,
+            },
+        ),
+    })
+
+    # Signals errors via exception throwing
+    schema(mapping)
 
 
 class SafeYamlLoader(yaml.SafeLoader):
@@ -801,8 +863,8 @@ def check_yaml(file_name, contents):
         yield (line, e)
     except KeyError as e:
         yield (None, "Duplicated Key ({})".format(e.message))
-    except ValueError as e:
-        yield (None, e.message)
+    except voluptuous.MultipleInvalid as e:
+        yield (None, str(e))
 
 
 def check_for_possible_duplicate_json_keys(key_value_pairs):
@@ -853,7 +915,7 @@ def check_spec(file_name, lines):
     macro_patt = re.compile("^\s*\S+!(.*)$")
 
     # Pattern representing a line with comment containing a spec link
-    link_patt = re.compile("^\s*///? https://.+$")
+    link_patt = re.compile("^\s*///? (<https://.+>|https://.+)$")
 
     # Pattern representing a line with comment or attribute
     comment_patt = re.compile("^\s*(///?.+|#\[.+\])$")
@@ -1101,6 +1163,8 @@ def run_lint_scripts(only_changed_files=False, progress=True, stylo=False):
 def scan(only_changed_files=False, progress=True, stylo=False):
     # check config file for errors
     config_errors = check_config_file(CONFIG_FILE_PATH)
+    # check ini directories exist
+    manifest_errors = check_manifest_dirs(WPT_MANIFEST_PATH)
     # check directories contain expected files
     directory_errors = check_directory_files(config['check_ext'])
     # standard checks
@@ -1114,7 +1178,7 @@ def scan(only_changed_files=False, progress=True, stylo=False):
     # other lint checks
     lint_errors = run_lint_scripts(only_changed_files, progress, stylo=stylo)
     # chain all the iterators
-    errors = itertools.chain(config_errors, directory_errors, lint_errors,
+    errors = itertools.chain(config_errors, manifest_errors, directory_errors, lint_errors,
                              file_errors, dep_license_errors)
 
     error = None

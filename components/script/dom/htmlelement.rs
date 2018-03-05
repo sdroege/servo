@@ -8,6 +8,7 @@ use dom::bindings::codegen::Bindings::ElementBinding::ElementMethods;
 use dom::bindings::codegen::Bindings::EventHandlerBinding::EventHandlerNonNull;
 use dom::bindings::codegen::Bindings::HTMLElementBinding;
 use dom::bindings::codegen::Bindings::HTMLElementBinding::HTMLElementMethods;
+use dom::bindings::codegen::Bindings::NodeBinding::NodeBinding::NodeMethods;
 use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::error::{Error, ErrorResult};
 use dom::bindings::inheritance::{ElementTypeId, HTMLElementTypeId, NodeTypeId};
@@ -16,21 +17,26 @@ use dom::bindings::root::{Dom, DomRoot, MutNullableDom, RootedReference};
 use dom::bindings::str::DOMString;
 use dom::cssstyledeclaration::{CSSModificationAccess, CSSStyleDeclaration, CSSStyleOwner};
 use dom::document::{Document, FocusType};
+use dom::documentfragment::DocumentFragment;
 use dom::domstringmap::DOMStringMap;
 use dom::element::{AttributeMutation, Element};
 use dom::eventtarget::EventTarget;
 use dom::htmlbodyelement::HTMLBodyElement;
+use dom::htmlbrelement::HTMLBRElement;
 use dom::htmlframesetelement::HTMLFrameSetElement;
 use dom::htmlhtmlelement::HTMLHtmlElement;
-use dom::htmlinputelement::HTMLInputElement;
+use dom::htmlinputelement::{HTMLInputElement, InputType};
 use dom::htmllabelelement::HTMLLabelElement;
-use dom::node::{Node, SEQUENTIALLY_FOCUSABLE};
+use dom::node::{Node, NodeFlags};
 use dom::node::{document_from_node, window_from_node};
 use dom::nodelist::NodeList;
+use dom::text::Text;
 use dom::virtualmethods::VirtualMethods;
+use dom::window::ReflowReason;
 use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix};
-use std::ascii::AsciiExt;
+use script_layout_interface::message::ReflowGoal;
+use std::collections::HashSet;
 use std::default::Default;
 use std::rc::Rc;
 use style::attr::AttrValue;
@@ -62,7 +68,7 @@ impl HTMLElement {
 
     #[allow(unrooted_must_root)]
     pub fn new(local_name: LocalName, prefix: Option<Prefix>, document: &Document) -> DomRoot<HTMLElement> {
-        Node::reflect_node(box HTMLElement::new_inherited(local_name, prefix, document),
+        Node::reflect_node(Box::new(HTMLElement::new_inherited(local_name, prefix, document)),
                            document,
                            HTMLElementBinding::Wrap)
     }
@@ -76,18 +82,18 @@ impl HTMLElement {
         let element = self.upcast::<Element>();
         let node = self.upcast::<Node>();
         if element.has_attribute(&local_name!("tabindex")) {
-            node.set_flag(SEQUENTIALLY_FOCUSABLE, true);
+            node.set_flag(NodeFlags::SEQUENTIALLY_FOCUSABLE, true);
         } else {
             match node.type_id() {
                 NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLButtonElement)) |
                 NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLSelectElement)) |
                 NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLIFrameElement)) |
                 NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLTextAreaElement))
-                    => node.set_flag(SEQUENTIALLY_FOCUSABLE, true),
+                    => node.set_flag(NodeFlags::SEQUENTIALLY_FOCUSABLE, true),
                 NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLLinkElement)) |
                 NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLAnchorElement)) => {
                     if element.has_attribute(&local_name!("href")) {
-                        node.set_flag(SEQUENTIALLY_FOCUSABLE, true);
+                        node.set_flag(NodeFlags::SEQUENTIALLY_FOCUSABLE, true);
                     }
                 },
                 _ => {
@@ -97,9 +103,9 @@ impl HTMLElement {
                             AttrValue::String(ref string) => string == "true",
                             _ => false,
                         };
-                        node.set_flag(SEQUENTIALLY_FOCUSABLE, is_true);
+                        node.set_flag(NodeFlags::SEQUENTIALLY_FOCUSABLE, is_true);
                     } else {
-                        node.set_flag(SEQUENTIALLY_FOCUSABLE, false);
+                        node.set_flag(NodeFlags::SEQUENTIALLY_FOCUSABLE, false);
                     }
                     //TODO set SEQUENTIALLY_FOCUSABLE flag if editing host
                     //TODO set SEQUENTIALLY_FOCUSABLE flag if "sorting interface th elements"
@@ -277,6 +283,38 @@ impl HTMLElementMethods for HTMLElement {
         }
     }
 
+    // https://html.spec.whatwg.org/multipage/#attr-itemtype
+    fn Itemtypes(&self) -> Option<Vec<DOMString>> {
+        let atoms = self.element.get_tokenlist_attribute(&local_name!("itemtype"), );
+
+        if atoms.is_empty() {
+            return None;
+        }
+
+        let mut item_attr_values = HashSet::new();
+        for attr_value in &atoms {
+            item_attr_values.insert(DOMString::from(String::from(attr_value.trim())));
+        }
+
+        Some(item_attr_values.into_iter().collect())
+    }
+
+    // https://html.spec.whatwg.org/multipage/#names:-the-itemprop-attribute
+    fn PropertyNames(&self) -> Option<Vec<DOMString>> {
+        let atoms = self.element.get_tokenlist_attribute(&local_name!("itemprop"), );
+
+        if atoms.is_empty() {
+            return None;
+        }
+
+        let mut item_attr_values = HashSet::new();
+        for attr_value in &atoms {
+            item_attr_values.insert(DOMString::from(String::from(attr_value.trim())));
+        }
+
+        Some(item_attr_values.into_iter().collect())
+    }
+
     // https://html.spec.whatwg.org/multipage/#dom-click
     fn Click(&self) {
         if !self.upcast::<Element>().disabled_state() {
@@ -368,6 +406,79 @@ impl HTMLElementMethods for HTMLElement {
 
         rect.size.height.to_nearest_px()
     }
+
+    // https://html.spec.whatwg.org/multipage/#the-innertext-idl-attribute
+    fn InnerText(&self) -> DOMString {
+        let node = self.upcast::<Node>();
+        let window = window_from_node(node);
+        let element = self.upcast::<Element>();
+
+        // Step 1.
+        let element_not_rendered = !node.is_in_doc() || !element.has_css_layout_box();
+        if element_not_rendered {
+            return node.GetTextContent().unwrap();
+        }
+
+        window.reflow(ReflowGoal::ElementInnerTextQuery(node.to_trusted_node_address()), ReflowReason::Query);
+        DOMString::from(window.layout().element_inner_text())
+    }
+
+    // https://html.spec.whatwg.org/multipage/#the-innertext-idl-attribute
+    fn SetInnerText(&self, input: DOMString) {
+        // Step 1.
+        let document = document_from_node(self);
+
+        // Step 2.
+        let fragment = DocumentFragment::new(&document);
+
+        // Step 3. The given value is already named 'input'.
+
+        // Step 4.
+        let mut position = input.chars().peekable();
+
+        // Step 5.
+        let mut text = String::new();
+
+        // Step 6.
+        while let Some(ch) = position.next() {
+            match ch {
+                '\u{000A}' | '\u{000D}' => {
+                    if ch == '\u{000D}' && position.peek() == Some(&'\u{000A}') {
+                        // a \r\n pair should only generate one <br>,
+                        // so just skip the \r.
+                        position.next();
+                    }
+
+                    if !text.is_empty() {
+                        append_text_node_to_fragment(&document, &fragment, text);
+                        text = String::new();
+                    }
+
+                    let br = HTMLBRElement::new(local_name!("br"), None, &document);
+                    fragment.upcast::<Node>().AppendChild(&br.upcast()).unwrap();
+                },
+                _ => {
+                    text.push(ch);
+                }
+            }
+        }
+
+        if !text.is_empty() {
+            append_text_node_to_fragment(&document, &fragment, text);
+        }
+
+        // Step 7.
+        Node::replace_all(Some(fragment.upcast()), self.upcast::<Node>());
+    }
+}
+
+fn append_text_node_to_fragment(
+    document: &Document,
+    fragment: &DocumentFragment,
+    text: String
+) {
+    let text = Text::new(DOMString::from(text), document);
+    fragment.upcast::<Node>().AppendChild(&text.upcast()).unwrap();
 }
 
 // https://html.spec.whatwg.org/multipage/#attr-data-*
@@ -375,11 +486,19 @@ impl HTMLElementMethods for HTMLElement {
 static DATA_PREFIX: &str = "data-";
 static DATA_HYPHEN_SEPARATOR: char = '\x2d';
 
+fn is_ascii_uppercase(c: char) -> bool {
+    'A' <= c && c <= 'Z'
+}
+
+fn is_ascii_lowercase(c: char) -> bool {
+    'a' <= c && c <= 'w'
+}
+
 fn to_snake_case(name: DOMString) -> DOMString {
     let mut attr_name = String::with_capacity(name.len() + DATA_PREFIX.len());
     attr_name.push_str(DATA_PREFIX);
     for ch in name.chars() {
-        if ch.is_ascii_uppercase() {
+        if is_ascii_uppercase(ch) {
             attr_name.push(DATA_HYPHEN_SEPARATOR);
             attr_name.push(ch.to_ascii_lowercase());
         } else {
@@ -400,7 +519,7 @@ fn to_camel_case(name: &str) -> Option<DOMString> {
         return None;
     }
     let name = &name[5..];
-    let has_uppercase = name.chars().any(|curr_char| curr_char.is_ascii_uppercase());
+    let has_uppercase = name.chars().any(|curr_char| is_ascii_uppercase(curr_char));
     if has_uppercase {
         return None;
     }
@@ -410,7 +529,7 @@ fn to_camel_case(name: &str) -> Option<DOMString> {
         //check for hyphen followed by character
         if curr_char == DATA_HYPHEN_SEPARATOR {
             if let Some(next_char) = name_chars.next() {
-                if next_char.is_ascii_lowercase() {
+                if is_ascii_lowercase(next_char) {
                     result.push(next_char.to_ascii_uppercase());
                 } else {
                     result.push(curr_char);
@@ -457,7 +576,7 @@ impl HTMLElement {
             NodeTypeId::Element(ElementTypeId::HTMLElement(type_id)) =>
                 match type_id {
                     HTMLElementTypeId::HTMLInputElement =>
-                        self.downcast::<HTMLInputElement>().unwrap().type_() != atom!("hidden"),
+                        self.downcast::<HTMLInputElement>().unwrap().input_type() != InputType::Hidden,
                     HTMLElementTypeId::HTMLButtonElement |
                         HTMLElementTypeId::HTMLMeterElement |
                         HTMLElementTypeId::HTMLOutputElement |
@@ -568,5 +687,18 @@ impl VirtualMethods for HTMLElement {
             s.bind_to_tree(tree_in_doc);
         }
         self.update_sequentially_focusable_status();
+    }
+
+    fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
+        match name {
+            &local_name!("itemprop") => AttrValue::from_serialized_tokenlist(value.into()),
+            &local_name!("itemtype") => AttrValue::from_serialized_tokenlist(value.into()),
+            _ => {
+                self.super_type().unwrap().parse_plain_attribute(
+                    name,
+                    value,
+                )
+            },
+        }
     }
 }

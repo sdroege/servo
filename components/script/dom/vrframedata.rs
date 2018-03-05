@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use core::nonzero::NonZero;
 use dom::bindings::codegen::Bindings::VRFrameDataBinding;
 use dom::bindings::codegen::Bindings::VRFrameDataBinding::VRFrameDataMethods;
 use dom::bindings::error::Fallible;
@@ -17,6 +16,7 @@ use js::jsapi::{Heap, JSContext, JSObject};
 use js::typedarray::{Float32Array, CreateWith};
 use std::cell::Cell;
 use std::ptr;
+use std::ptr::NonNull;
 use webvr_traits::WebVRFrameData;
 
 #[dom_struct]
@@ -53,7 +53,7 @@ impl VRFrameData {
                       0.0, 0.0, 0.0, 1.0f32];
         let pose = VRPose::new(&global, &Default::default());
 
-        let root = reflect_dom_object(box VRFrameData::new_inherited(&pose),
+        let root = reflect_dom_object(Box::new(VRFrameData::new_inherited(&pose)),
                                       global,
                                       VRFrameDataBinding::Wrap);
         let cx = global.get_cx();
@@ -73,7 +73,7 @@ impl VRFrameData {
 
 #[allow(unsafe_code)]
 fn create_typed_array(cx: *mut JSContext, src: &[f32], dst: &Heap<*mut JSObject>) {
-    rooted!(in (cx) let mut array = ptr::null_mut());
+    rooted!(in (cx) let mut array = ptr::null_mut::<JSObject>());
     unsafe {
         let _ = Float32Array::create(cx, CreateWith::Slice(src), array.handle_mut());
     }
@@ -118,26 +118,26 @@ impl VRFrameDataMethods for VRFrameData {
 
     #[allow(unsafe_code)]
     // https://w3c.github.io/webvr/#dom-vrframedata-leftprojectionmatrix
-    unsafe fn LeftProjectionMatrix(&self, _cx: *mut JSContext) -> NonZero<*mut JSObject> {
-        NonZero::new_unchecked(self.left_proj.get())
+    unsafe fn LeftProjectionMatrix(&self, _cx: *mut JSContext) -> NonNull<JSObject> {
+        NonNull::new_unchecked(self.left_proj.get())
     }
 
     #[allow(unsafe_code)]
     // https://w3c.github.io/webvr/#dom-vrframedata-leftviewmatrix
-    unsafe fn LeftViewMatrix(&self, _cx: *mut JSContext) -> NonZero<*mut JSObject> {
-        NonZero::new_unchecked(self.left_view.get())
+    unsafe fn LeftViewMatrix(&self, _cx: *mut JSContext) -> NonNull<JSObject> {
+        NonNull::new_unchecked(self.left_view.get())
     }
 
     #[allow(unsafe_code)]
     // https://w3c.github.io/webvr/#dom-vrframedata-rightprojectionmatrix
-    unsafe fn RightProjectionMatrix(&self, _cx: *mut JSContext) -> NonZero<*mut JSObject> {
-        NonZero::new_unchecked(self.right_proj.get())
+    unsafe fn RightProjectionMatrix(&self, _cx: *mut JSContext) -> NonNull<JSObject> {
+        NonNull::new_unchecked(self.right_proj.get())
     }
 
     #[allow(unsafe_code)]
     // https://w3c.github.io/webvr/#dom-vrframedata-rightviewmatrix
-    unsafe fn RightViewMatrix(&self, _cx: *mut JSContext) -> NonZero<*mut JSObject> {
-        NonZero::new_unchecked(self.right_view.get())
+    unsafe fn RightViewMatrix(&self, _cx: *mut JSContext) -> NonNull<JSObject> {
+        NonNull::new_unchecked(self.right_view.get())
     }
 
     // https://w3c.github.io/webvr/#dom-vrframedata-pose

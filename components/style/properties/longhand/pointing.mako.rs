@@ -6,143 +6,12 @@
 
 <% data.new_style_struct("Pointing", inherited=True, gecko_name="UserInterface") %>
 
-<%helpers:longhand name="cursor" boxed="${product == 'gecko'}" animation_value_type="discrete"
-  spec="https://drafts.csswg.org/css-ui/#cursor">
-    pub use self::computed_value::T as SpecifiedValue;
-    #[cfg(feature = "gecko")]
-    use values::specified::url::SpecifiedUrl;
-
-    pub mod computed_value {
-        #[cfg(feature = "gecko")]
-        use std::fmt;
-        #[cfg(feature = "gecko")]
-        use style_traits::ToCss;
-        use style_traits::cursor::Cursor;
-        #[cfg(feature = "gecko")]
-        use values::specified::url::SpecifiedUrl;
-
-        #[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-        #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-        #[derive(Clone, Copy, Debug, PartialEq, ToComputedValue, ToCss)]
-        pub enum Keyword {
-            Auto,
-            Cursor(Cursor),
-        }
-
-        #[cfg(not(feature = "gecko"))]
-        pub type T = Keyword;
-
-        #[cfg(feature = "gecko")]
-        #[derive(Clone, Debug, MallocSizeOf, PartialEq, ToComputedValue)]
-        pub struct Image {
-            pub url: SpecifiedUrl,
-            pub hotspot: Option<(f32, f32)>,
-        }
-
-        #[cfg(feature = "gecko")]
-        #[derive(Clone, Debug, MallocSizeOf, PartialEq, ToComputedValue)]
-        pub struct T {
-            pub images: Vec<Image>,
-            pub keyword: Keyword,
-        }
-
-        #[cfg(feature = "gecko")]
-        impl ToCss for Image {
-            fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-                self.url.to_css(dest)?;
-                if let Some((x, y)) = self.hotspot {
-                    dest.write_str(" ")?;
-                    x.to_css(dest)?;
-                    dest.write_str(" ")?;
-                    y.to_css(dest)?;
-                }
-                Ok(())
-            }
-        }
-
-        #[cfg(feature = "gecko")]
-        impl ToCss for T {
-            fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-                for url in &self.images {
-                    url.to_css(dest)?;
-                    dest.write_str(", ")?;
-                }
-                self.keyword.to_css(dest)
-            }
-        }
-    }
-
-    #[cfg(not(feature = "gecko"))]
-    #[inline]
-    pub fn get_initial_value() -> computed_value::T {
-        computed_value::Keyword::Auto
-    }
-
-    #[cfg(feature = "gecko")]
-    #[inline]
-    pub fn get_initial_value() -> computed_value::T {
-        computed_value::T {
-            images: vec![],
-            keyword: computed_value::Keyword::Auto
-        }
-    }
-
-    impl Parse for computed_value::Keyword {
-        fn parse<'i, 't>(_context: &ParserContext, input: &mut Parser<'i, 't>)
-                         -> Result<computed_value::Keyword, ParseError<'i>> {
-            use std::ascii::AsciiExt;
-            use style_traits::cursor::Cursor;
-            let ident = input.expect_ident()?;
-            if ident.eq_ignore_ascii_case("auto") {
-                Ok(computed_value::Keyword::Auto)
-            } else {
-                Cursor::from_css_keyword(&ident)
-                    .map(computed_value::Keyword::Cursor)
-                    .map_err(|()| SelectorParseError::UnexpectedIdent(ident.clone()).into())
-            }
-        }
-    }
-
-    #[cfg(feature = "gecko")]
-    fn parse_image<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>)
-                           -> Result<computed_value::Image, ParseError<'i>> {
-        Ok(computed_value::Image {
-            url: SpecifiedUrl::parse(context, input)?,
-            hotspot: match input.try(|input| input.expect_number()) {
-                Ok(number) => Some((number, input.expect_number()?)),
-                Err(_) => None,
-            },
-        })
-    }
-
-    #[cfg(not(feature = "gecko"))]
-    pub fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>)
-                         -> Result<SpecifiedValue, ParseError<'i>> {
-        computed_value::Keyword::parse(context, input)
-    }
-
-    /// cursor: [<url> [<number> <number>]?]# [auto | default | ...]
-    #[cfg(feature = "gecko")]
-    pub fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>)
-                         -> Result<SpecifiedValue, ParseError<'i>> {
-        let mut images = vec![];
-        loop {
-            match input.try(|input| parse_image(context, input)) {
-                Ok(mut image) => {
-                    image.url.build_image_value();
-                    images.push(image)
-                }
-                Err(_) => break,
-            }
-            input.expect_comma()?;
-        }
-
-        Ok(computed_value::T {
-            images: images,
-            keyword: computed_value::Keyword::parse(context, input)?,
-        })
-    }
-</%helpers:longhand>
+${helpers.predefined_type("cursor",
+                          "Cursor",
+                          "computed::Cursor::auto()",
+                          initial_specified_value="specified::Cursor::auto()",
+                          animation_value_type="discrete",
+                          spec="https://drafts.csswg.org/css-ui/#cursor")}
 
 // NB: `pointer-events: auto` (and use of `pointer-events` in anything that isn't SVG, in fact)
 // is nonstandard, slated for CSS4-UI.
@@ -152,7 +21,7 @@ ${helpers.single_keyword("pointer-events", "auto none", animation_value_type="di
                          flags="APPLIES_TO_PLACEHOLDER",
                          spec="https://www.w3.org/TR/SVG11/interact.html#PointerEventsProperty")}
 
-${helpers.single_keyword("-moz-user-input", "auto none enabled disabled",
+${helpers.single_keyword("-moz-user-input", "auto none",
                          products="gecko", gecko_ffi_name="mUserInput",
                          gecko_enum_prefix="StyleUserInput",
                          animation_value_type="discrete",
@@ -174,22 +43,10 @@ ${helpers.single_keyword("-moz-user-focus",
 
 ${helpers.predefined_type(
     "caret-color",
-    "ColorOrAuto",
-    "Either::Second(Auto)",
+    "CaretColor",
+    "generics::pointing::CaretColor::Auto",
     spec="https://drafts.csswg.org/css-ui/#caret-color",
-    animation_value_type="Either<AnimatedColor, Auto>",
-    boxed=True,
+    animation_value_type="AnimatedCaretColor",
     ignored_when_colors_disabled=True,
     products="gecko",
-)}
-
-${helpers.predefined_type(
-    "-moz-font-smoothing-background-color",
-    "RGBAColor",
-    "RGBA::transparent()",
-    animation_value_type="AnimatedRGBA",
-    products="gecko",
-    gecko_ffi_name="mFontSmoothingBackgroundColor",
-    internal=True,
-    spec="None (Nonstandard internal property)"
 )}

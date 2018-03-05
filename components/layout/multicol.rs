@@ -10,10 +10,10 @@ use ServoArc;
 use app_units::Au;
 use block::BlockFlow;
 use context::LayoutContext;
-use display_list_builder::{DisplayListBuildState, StackingContextCollectionState};
+use display_list::{DisplayListBuildState, StackingContextCollectionState};
 use euclid::{Point2D, Vector2D};
 use floats::FloatKind;
-use flow::{Flow, FlowClass, OpaqueFlow, mut_base, FragmentationContext};
+use flow::{Flow, FlowClass, OpaqueFlow, FragmentationContext, GetBaseFlow};
 use fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
 use gfx_traits::print_tree::PrintTree;
 use std::cmp::{min, max};
@@ -23,7 +23,12 @@ use style::logical_geometry::LogicalSize;
 use style::properties::ComputedValues;
 use style::values::Either;
 use style::values::computed::{LengthOrPercentageOrAuto, LengthOrPercentageOrNone};
+use style::values::generics::column::ColumnCount;
 
+#[allow(unsafe_code)]
+unsafe impl ::flow::HasBaseFlow for MulticolFlow {}
+
+#[repr(C)]
 pub struct MulticolFlow {
     pub block_flow: BlockFlow,
 
@@ -32,6 +37,10 @@ pub struct MulticolFlow {
     pub column_pitch: Au,
 }
 
+#[allow(unsafe_code)]
+unsafe impl ::flow::HasBaseFlow for MulticolColumnFlow {}
+
+#[repr(C)]
 pub struct MulticolColumnFlow {
     pub block_flow: BlockFlow,
 }
@@ -107,12 +116,12 @@ impl Flow for MulticolFlow {
                 let column_width = Au::from(column_width);
                 column_count =
                     max(1, (content_inline_size + column_gap).0 / (column_width + column_gap).0);
-                if let Either::First(specified_column_count) = column_style.column_count {
+                if let ColumnCount::Integer(specified_column_count) = column_style.column_count {
                     column_count = min(column_count, specified_column_count.0 as i32);
                 }
             } else {
                 column_count = match column_style.column_count {
-                    Either::First(n) => n.0,
+                    ColumnCount::Integer(n) => n.0,
                     _ => unreachable!(),
                 }
             }
@@ -151,7 +160,7 @@ impl Flow for MulticolFlow {
         });
 
         // Before layout, everything is in a single "column"
-        assert!(self.block_flow.base.children.len() == 1);
+        assert_eq!(self.block_flow.base.children.len(), 1);
         let mut column = self.block_flow.base.children.pop_front_arc().unwrap();
 
         // Pretend there is no children for this:
@@ -172,7 +181,7 @@ impl Flow for MulticolFlow {
         let pitch = LogicalSize::new(self.block_flow.base.writing_mode, self.column_pitch, Au(0));
         let pitch = pitch.to_physical(self.block_flow.base.writing_mode);
         for (i, child) in self.block_flow.base.children.iter_mut().enumerate() {
-            let point = &mut mut_base(child).stacking_relative_position;
+            let point = &mut child.mut_base().stacking_relative_position;
             *point = *point + Vector2D::new(pitch.width * i as i32, pitch.height * i as i32);
         }
     }

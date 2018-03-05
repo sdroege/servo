@@ -4,15 +4,13 @@
 
 //! Generic types for CSS values related to borders.
 
-use std::fmt;
-use style_traits::ToCss;
+use std::fmt::{self, Write};
+use style_traits::{CssWriter, ToCss};
 use values::generics::rect::Rect;
 use values::generics::size::Size;
 
 /// A generic value for a single side of a `border-image-width` property.
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Clone, Copy, Debug, PartialEq, ToComputedValue, ToCss)]
+#[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq, ToComputedValue, ToCss)]
 pub enum BorderImageSideWidth<LengthOrPercentage, Number> {
     /// `<length-or-percentage>`
     Length(LengthOrPercentage),
@@ -23,9 +21,7 @@ pub enum BorderImageSideWidth<LengthOrPercentage, Number> {
 }
 
 /// A generic value for the `border-image-slice` property.
-#[derive(Clone, Copy, Debug, PartialEq, ToComputedValue)]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq, ToComputedValue)]
 pub struct BorderImageSlice<NumberOrPercentage> {
     /// The offsets.
     pub offsets: Rect<NumberOrPercentage>,
@@ -34,10 +30,8 @@ pub struct BorderImageSlice<NumberOrPercentage> {
 }
 
 /// A generic value for the `border-*-radius` longhand properties.
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 #[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug)]
-#[derive(PartialEq, ToComputedValue, ToCss)]
+#[derive(MallocSizeOf, PartialEq, ToComputedValue, ToCss)]
 pub struct BorderCornerRadius<L>(pub Size<L>);
 
 impl<L> BorderCornerRadius<L> {
@@ -48,10 +42,8 @@ impl<L> BorderCornerRadius<L> {
 }
 
 /// A generic value for the `border-spacing` property.
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug)]
-#[derive(PartialEq, ToAnimatedValue, ToComputedValue, ToCss)]
+#[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug, MallocSizeOf)]
+#[derive(PartialEq, ToAnimatedValue, ToAnimatedZero, ToComputedValue, ToCss)]
 pub struct BorderSpacing<L>(pub Size<L>);
 
 impl<L> BorderSpacing<L> {
@@ -63,11 +55,9 @@ impl<L> BorderSpacing<L> {
 
 /// A generic value for `border-radius`, `outline-radius` and `inset()`.
 ///
-/// https://drafts.csswg.org/css-backgrounds-3/#border-radius
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+/// <https://drafts.csswg.org/css-backgrounds-3/#border-radius>
 #[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug)]
-#[derive(PartialEq, ToComputedValue)]
+#[derive(MallocSizeOf, PartialEq, ToComputedValue)]
 pub struct BorderRadius<LengthOrPercentage> {
     /// The top left radius.
     pub top_left: BorderCornerRadius<LengthOrPercentage>,
@@ -94,8 +84,9 @@ impl<N> From<N> for BorderImageSlice<N>
 impl<N> ToCss for BorderImageSlice<N>
     where N: PartialEq + ToCss,
 {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result
-        where W: fmt::Write
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
     {
         self.offsets.to_css(dest)?;
         if self.fill {
@@ -128,8 +119,13 @@ impl<L> BorderRadius<L>
 {
     /// Serialises two given rects following the syntax of the `border-radius``
     /// property.
-    pub fn serialize_rects<W>(widths: Rect<&L>, heights: Rect<&L>, dest: &mut W) -> fmt::Result
-        where W: fmt::Write,
+    pub fn serialize_rects<W>(
+        widths: Rect<&L>,
+        heights: Rect<&L>,
+        dest: &mut CssWriter<W>,
+    ) -> fmt::Result
+    where
+        W: Write,
     {
         widths.to_css(dest)?;
         if widths.0 != heights.0 || widths.1 != heights.1 || widths.2 != heights.2 || widths.3 != heights.3 {
@@ -143,7 +139,10 @@ impl<L> BorderRadius<L>
 impl<L> ToCss for BorderRadius<L>
     where L: PartialEq + ToCss
 {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         let BorderRadius {
             top_left: BorderCornerRadius(ref tl),
             top_right: BorderCornerRadius(ref tr),

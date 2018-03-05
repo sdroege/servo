@@ -70,7 +70,6 @@ use atomic_refcell::{AtomicRefCell, AtomicRefMut};
 use bloom::StyleBloom;
 use context::{SelectorFlagsMap, SharedStyleContext, StyleContext};
 use dom::{TElement, SendElement};
-use lru_cache::{LRUCache, Entry};
 use matching::MatchMethods;
 use owning_ref::OwningHandle;
 use properties::ComputedValues;
@@ -85,6 +84,7 @@ use std::mem;
 use std::ops::Deref;
 use style_resolver::{PrimaryStyle, ResolvedElementStyles};
 use stylist::Stylist;
+use uluru::{LRUCache, Entry};
 
 mod checks;
 
@@ -152,24 +152,25 @@ impl ValidationData {
     /// Get or compute the list of presentational attributes associated with
     /// this element.
     pub fn pres_hints<E>(&mut self, element: E) -> &[ApplicableDeclarationBlock]
-        where E: TElement,
+    where
+        E: TElement,
     {
-        if self.pres_hints.is_none() {
+        self.pres_hints.get_or_insert_with(|| {
             let mut pres_hints = SmallVec::new();
             element.synthesize_presentational_hints_for_legacy_attributes(
                 VisitedHandlingMode::AllLinksUnvisited,
                 &mut pres_hints
             );
-            self.pres_hints = Some(pres_hints);
-        }
-        &*self.pres_hints.as_ref().unwrap()
+            pres_hints
+        })
     }
 
     /// Get or compute the class-list associated with this element.
     pub fn class_list<E>(&mut self, element: E) -> &[Atom]
-        where E: TElement,
+    where
+        E: TElement,
     {
-        if self.class_list.is_none() {
+        self.class_list.get_or_insert_with(|| {
             let mut class_list = SmallVec::<[Atom; 5]>::new();
             element.each_class(|c| class_list.push(c.clone()));
             // Assuming there are a reasonable number of classes (we use the
@@ -179,21 +180,20 @@ impl ValidationData {
             if !class_list.spilled() {
                 class_list.sort_by(|a, b| a.get_hash().cmp(&b.get_hash()));
             }
-            self.class_list = Some(class_list);
-        }
-        &*self.class_list.as_ref().unwrap()
+            class_list
+        })
     }
 
     /// Get or compute the parent style identity.
     pub fn parent_style_identity<E>(&mut self, el: E) -> OpaqueComputedValues
-        where E: TElement,
+    where
+        E: TElement,
     {
-        if self.parent_style_identity.is_none() {
+        self.parent_style_identity.get_or_insert_with(|| {
             let parent = el.inheritance_parent().unwrap();
-            self.parent_style_identity =
-                Some(OpaqueComputedValues::from(parent.borrow_data().unwrap().styles.primary()));
-        }
-        self.parent_style_identity.as_ref().unwrap().clone()
+            let values = OpaqueComputedValues::from(parent.borrow_data().unwrap().styles.primary());
+            values
+        }).clone()
     }
 
     /// Computes the revalidation results if needed, and returns it.
@@ -206,12 +206,13 @@ impl ValidationData {
         bloom: &StyleBloom<E>,
         nth_index_cache: &mut NthIndexCache,
         bloom_known_valid: bool,
-        flags_setter: &mut F
+        flags_setter: &mut F,
     ) -> &SmallBitVec
-        where E: TElement,
-              F: FnMut(&E, ElementSelectorFlags),
+    where
+        E: TElement,
+        F: FnMut(&E, ElementSelectorFlags),
     {
-        if self.revalidation_match_results.is_none() {
+        self.revalidation_match_results.get_or_insert_with(|| {
             // The bloom filter may already be set up for our element.
             // If it is, use it.  If not, we must be in a candidate
             // (i.e. something in the cache), and the element is one
@@ -229,14 +230,13 @@ impl ValidationData {
                     None
                 }
             };
-            self.revalidation_match_results =
-                Some(stylist.match_revalidation_selectors(&element,
-                                                          bloom_to_use,
-                                                          nth_index_cache,
-                                                          flags_setter));
-        }
-
-        self.revalidation_match_results.as_ref().unwrap()
+            stylist.match_revalidation_selectors(
+                element,
+                bloom_to_use,
+                nth_index_cache,
+                flags_setter,
+            )
+        })
     }
 }
 
@@ -418,7 +418,7 @@ impl<E: TElement> StyleSharingTarget<E> {
 }
 
 struct SharingCacheBase<Candidate> {
-    entries: LRUCache<Candidate, [Entry<Candidate>; SHARING_CACHE_BACKING_STORE_SIZE]>,
+    entries: LRUCache<[Entry<Candidate>; SHARING_CACHE_BACKING_STORE_SIZE]>,
 }
 
 impl<Candidate> Default for SharingCacheBase<Candidate> {
@@ -645,6 +645,8 @@ impl<E: TElement> StyleSharingCache<E> {
         nth_index_cache: &mut NthIndexCache,
         selector_flags_map: &mut SelectorFlagsMap<E>
     ) -> Option<ResolvedElementStyles> {
+        debug_assert!(!target.is_native_anonymous());
+
         // Check that we have the same parent, or at least that the parents
         // share styles and permit sharing across their children. The latter
         // check allows us to share style between cousins if the parents
@@ -654,19 +656,32 @@ impl<E: TElement> StyleSharingCache<E> {
             return None;
         }
 
-        if target.is_native_anonymous() {
-            debug_assert!(!candidate.element.is_native_anonymous(),
-                          "Why inserting NAC into the cache?");
-            trace!("Miss: Native Anonymous Content");
+        // Note that in the XBL case, we should be able to assert that the
+        // scopes are different, since two elements with different XBL bindings
+        // need to necessarily have different style (and thus children of them
+        // would never pass the parent check).
+        if target.element.style_scope() != candidate.element.style_scope() {
+            trace!("Miss: Different style scopes");
             return None;
         }
 
-        if *target.get_local_name() != *candidate.element.get_local_name() {
+        // If the elements are not assigned to the same slot they could match
+        // different ::slotted() rules in the slot scope.
+        //
+        // If two elements are assigned to different slots, even within the same
+        // shadow root, they could match different rules, due to the slot being
+        // assigned to yet another slot in another shadow root.
+        if target.element.assigned_slot() != candidate.element.assigned_slot() {
+            trace!("Miss: Different style scopes");
+            return None;
+        }
+
+        if target.local_name() != candidate.element.local_name() {
             trace!("Miss: Local Name");
             return None;
         }
 
-        if *target.get_namespace() != *candidate.element.get_namespace() {
+        if target.namespace() != candidate.element.namespace() {
             trace!("Miss: Namespace");
             return None;
         }
@@ -685,20 +700,22 @@ impl<E: TElement> StyleSharingCache<E> {
         // We do not ignore visited state here, because Gecko
         // needs to store extra bits on visited style contexts,
         // so these contexts cannot be shared
-        if target.element.get_state() != candidate.get_state() {
+        if target.element.state() != candidate.state() {
             trace!("Miss: User and Author State");
             return None;
         }
 
-        let element_id = target.element.get_id();
-        let candidate_id = candidate.element.get_id();
-        if element_id != candidate_id {
-            // It's possible that there are no styles for either id.
-            if checks::may_have_rules_for_ids(shared, element_id.as_ref(),
-                                              candidate_id.as_ref()) {
-                trace!("Miss: ID Attr");
-                return None;
-            }
+        // It's possible that there are no styles for either id.
+        let may_match_different_id_rules =
+            checks::may_match_different_id_rules(
+                shared,
+                target.element,
+                candidate.element,
+            );
+
+        if may_match_different_id_rules {
+            trace!("Miss: ID Attr");
+            return None;
         }
 
         if !checks::have_same_style_attribute(target, candidate) {

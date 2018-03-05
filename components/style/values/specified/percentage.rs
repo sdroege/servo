@@ -4,11 +4,11 @@
 
 //! Specified percentages.
 
-use cssparser::{BasicParseError, Parser, Token};
+use cssparser::{Parser, Token};
 use parser::{Parse, ParserContext};
-use std::ascii::AsciiExt;
-use std::fmt;
-use style_traits::{ParseError, ToCss};
+#[allow(unused_imports)] use std::ascii::AsciiExt;
+use std::fmt::{self, Write};
+use style_traits::{CssWriter, ParseError, ToCss};
 use style_traits::values::specified::AllowedNumericType;
 use values::{CSSFloat, serialize_percentage};
 use values::computed::{Context, ToComputedValue};
@@ -16,9 +16,7 @@ use values::computed::percentage::Percentage as ComputedPercentage;
 use values::specified::calc::CalcNode;
 
 /// A percentage value.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[derive(Clone, Copy, Debug, Default, MallocSizeOf, PartialEq)]
 pub struct Percentage {
     /// The percentage value as a float.
     ///
@@ -31,8 +29,9 @@ pub struct Percentage {
 
 
 impl ToCss for Percentage {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result
-        where W: fmt::Write,
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
     {
         if self.calc_clamping_mode.is_some() {
             dest.write_str("calc(")?;
@@ -97,13 +96,14 @@ impl Percentage {
         input: &mut Parser<'i, 't>,
         num_context: AllowedNumericType,
     ) -> Result<Self, ParseError<'i>> {
+        let location = input.current_source_location();
         // FIXME: remove early returns when lifetimes are non-lexical
         match *input.next()? {
             Token::Percentage { unit_value, .. } if num_context.is_ok(context.parsing_mode, unit_value) => {
                 return Ok(Percentage::new(unit_value));
             }
             Token::Function(ref name) if name.eq_ignore_ascii_case("calc") => {},
-            ref t => return Err(BasicParseError::UnexpectedToken(t.clone()).into()),
+            ref t => return Err(location.new_unexpected_token_error(t.clone())),
         }
 
         let result = input.parse_nested_block(|i| {

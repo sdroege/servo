@@ -2,6 +2,7 @@
 
 if (self.importScripts) {
   self.importScripts('../resources/rs-utils.js');
+  self.importScripts('../resources/test-utils.js');
   self.importScripts('/resources/testharness.js');
 }
 
@@ -520,27 +521,12 @@ promise_test(() => {
   return promise;
 }, 'ReadableStream with byte source: Push source that doesn\'t understand pull signal');
 
-promise_test(t => {
-  const stream = new ReadableStream({
+test(() => {
+  assert_throws(new TypeError(), () => new ReadableStream({
     pull: 'foo',
     type: 'bytes'
-  });
-
-  const reader = stream.getReader();
-
-  return promise_rejects(t, new TypeError(), reader.read(), 'read() must fail');
-}, 'ReadableStream with byte source: read(), but pull() function is not callable');
-
-promise_test(t => {
-  const stream = new ReadableStream({
-    pull: 'foo',
-    type: 'bytes'
-  });
-
-  const reader = stream.getReader({ mode: 'byob' });
-
-  return promise_rejects(t, new TypeError(), reader.read(new Uint8Array(1)), 'read() must fail');
-}, 'ReadableStream with byte source: read(view), but pull() function is not callable');
+  }), 'constructor should throw');
+}, 'ReadableStream with byte source: pull() function is not callable');
 
 promise_test(() => {
   const stream = new ReadableStream({
@@ -1897,6 +1883,115 @@ promise_test(t => {
 }, 'ReadableStream with byte source: Throwing in pull in response to read(view) must be ignored if the stream is ' +
    'errored in it');
 
+promise_test(() => {
+  let byobRequest;
+  const rs = new ReadableStream({
+    pull(controller) {
+      byobRequest = controller.byobRequest;
+      byobRequest.respond(4);
+    },
+    type: 'bytes'
+  });
+  const reader = rs.getReader({ mode: 'byob' });
+  const view = new Uint8Array(16);
+  return reader.read(view).then(() => {
+    assert_throws(new TypeError(), () => byobRequest.respond(4), 'respond() should throw a TypeError');
+  });
+}, 'calling respond() twice on the same byobRequest should throw');
+
+promise_test(() => {
+  let byobRequest;
+  const newView = () => new Uint8Array(16);
+  const rs = new ReadableStream({
+    pull(controller) {
+      byobRequest = controller.byobRequest;
+      byobRequest.respondWithNewView(newView());
+    },
+    type: 'bytes'
+  });
+  const reader = rs.getReader({ mode: 'byob' });
+  return reader.read(newView()).then(() => {
+    assert_throws(new TypeError(), () => byobRequest.respondWithNewView(newView()),
+                  'respondWithNewView() should throw a TypeError');
+  });
+}, 'calling respondWithNewView() twice on the same byobRequest should throw');
+
+promise_test(() => {
+  let byobRequest;
+  let resolvePullCalledPromise;
+  const pullCalledPromise = new Promise(resolve => {
+    resolvePullCalledPromise = resolve;
+  });
+  let resolvePull;
+  const rs = new ReadableStream({
+    pull(controller) {
+      byobRequest = controller.byobRequest;
+      resolvePullCalledPromise();
+      return new Promise(resolve => {
+        resolvePull = resolve;
+      });
+    },
+    type: 'bytes'
+  });
+  const reader = rs.getReader({ mode: 'byob' });
+  const readPromise = reader.read(new Uint8Array(16));
+  return pullCalledPromise.then(() => {
+    const cancelPromise = reader.cancel('meh');
+    resolvePull();
+    byobRequest.respond(0);
+    return Promise.all([readPromise, cancelPromise]).then(() => {
+      assert_throws(new TypeError(), () => byobRequest.respond(0), 'respond() should throw');
+    });
+  });
+}, 'calling respond(0) twice on the same byobRequest should throw even when closed');
+
+promise_test(() => {
+  let resolvePullCalledPromise;
+  const pullCalledPromise = new Promise(resolve => {
+    resolvePullCalledPromise = resolve;
+  });
+  let resolvePull;
+  const rs = new ReadableStream({
+    pull() {
+      resolvePullCalledPromise();
+      return new Promise(resolve => {
+        resolvePull = resolve;
+      });
+    },
+    type: 'bytes'
+  });
+  const reader = rs.getReader({ mode: 'byob' });
+  reader.read(new Uint8Array(16));
+  return pullCalledPromise.then(() => {
+    resolvePull();
+    return delay(0).then(() => {
+      assert_throws(new TypeError(), () => reader.releaseLock(), 'releaseLock() should throw');
+    });
+  });
+}, 'pull() resolving should not make releaseLock() possible');
+
+promise_test(() => {
+  // Tests https://github.com/whatwg/streams/issues/686
+
+  let controller;
+  const rs = new ReadableStream({
+    autoAllocateChunkSize: 128,
+    start(c) {
+      controller = c;
+    },
+    type: 'bytes'
+  });
+
+  const readPromise = rs.getReader().read();
+
+  const br = controller.byobRequest;
+  controller.close();
+
+  br.respond(0);
+
+  return readPromise;
+}, 'ReadableStream with byte source: default reader + autoAllocateChunkSize + byobRequest interaction');
+
 test(() => {
   const ReadableStreamBYOBReader = new ReadableStream({ type: 'bytes' }).getReader({ mode: 'byob' }).constructor;
   const stream = new ReadableStream({ type: 'bytes' });
@@ -1920,5 +2015,31 @@ test(() => {
   const stream = new ReadableStream();
   assert_throws(new TypeError(), () => new ReadableStreamBYOBReader(stream), 'constructor must throw');
 }, 'ReadableStreamBYOBReader constructor requires a ReadableStream with type "bytes"');
+
+test(() => {
+  assert_throws(new RangeError(), () => new ReadableStream({ type: 'bytes' }, {
+    size() {
+      return 1;
+    }
+  }), 'constructor should throw for size function');
+
+  assert_throws(new RangeError(), () => new ReadableStream({ type: 'bytes' }, { size: null }),
+                'constructor should throw for size defined');
+
+  assert_throws(new RangeError(),
+                () => new ReadableStream({ type: 'bytes' }, new CountQueuingStrategy({ highWaterMark: 1 })),
+                'constructor should throw when strategy is CountQueuingStrategy');
+
+  assert_throws(new RangeError(),
+                () => new ReadableStream({ type: 'bytes' }, new ByteLengthQueuingStrategy({ highWaterMark: 512 })),
+                'constructor should throw when strategy is ByteLengthQueuingStrategy');
+
+  class HasSizeMethod {
+    size() {}
+ }
+
+  assert_throws(new RangeError(), () => new ReadableStream({ type: 'bytes' }, new HasSizeMethod()),
+                'constructor should throw when size on the prototype chain');
+}, 'ReadableStream constructor should not accept a strategy with a size defined if type is "bytes"');
 
 done();

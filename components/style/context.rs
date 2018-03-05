@@ -5,16 +5,15 @@
 //! The context within which style is calculated.
 
 #[cfg(feature = "servo")] use animation::Animation;
-#[cfg(feature = "servo")] use animation::PropertyAnimation;
 use app_units::Au;
 use bloom::StyleBloom;
 use data::{EagerPseudoStyles, ElementData};
-use dom::{OpaqueNode, TNode, TElement, SendElement};
-use euclid::ScaleFactor;
+use dom::{TElement, SendElement};
+#[cfg(feature = "servo")] use dom::OpaqueNode;
 use euclid::Size2D;
+use euclid::TypedScale;
 use fnv::FnvHashMap;
 use font_metrics::FontMetricsProvider;
-use lru_cache::{Entry, LRUCache};
 #[cfg(feature = "gecko")] use gecko_bindings::structs;
 use parallel::{STACK_SAFETY_MARGIN_KB, STYLE_THREAD_STACK_SIZE_KB};
 #[cfg(feature = "servo")] use parking_lot::RwLock;
@@ -37,11 +36,12 @@ use style_traits::CSSPixel;
 use style_traits::DevicePixel;
 #[cfg(feature = "servo")] use style_traits::SpeculativePainter;
 use stylist::Stylist;
-use thread_state;
+use thread_state::{self, ThreadState};
 use time;
 use timer::Timer;
 use traversal::DomTraversal;
 use traversal_flags::TraversalFlags;
+use uluru::{Entry, LRUCache};
 
 pub use selectors::matching::QuirksMode;
 
@@ -116,6 +116,21 @@ impl Default for StyleSystemOptions {
     }
 }
 
+impl StyleSystemOptions {
+    #[cfg(feature = "servo")]
+    /// On Gecko's nightly build?
+    pub fn is_nightly(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "gecko")]
+    /// On Gecko's nightly build?
+    #[inline]
+    pub fn is_nightly(&self) -> bool {
+        structs::GECKO_IS_NIGHTLY
+    }
+}
+
 /// A shared style context.
 ///
 /// There's exactly one of these during a given restyle traversal, and it's
@@ -171,7 +186,7 @@ impl<'a> SharedStyleContext<'a> {
     }
 
     /// The device pixel ratio
-    pub fn device_pixel_ratio(&self) -> ScaleFactor<f32, CSSPixel, DevicePixel> {
+    pub fn device_pixel_ratio(&self) -> TypedScale<f32, CSSPixel, DevicePixel> {
         self.stylist.device().device_pixel_ratio()
     }
 
@@ -188,7 +203,7 @@ impl<'a> SharedStyleContext<'a> {
 /// within the `CurrentElementInfo`. At the end of the cascade, they are folded
 /// down into the main `ComputedValues` to reduce memory usage per element while
 /// still remaining accessible.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CascadeInputs {
     /// The rule node representing the ordered list of rules matched for this
     /// node.
@@ -208,15 +223,6 @@ impl CascadeInputs {
             rules: style.rules.clone(),
             visited_rules: style.visited_style().and_then(|v| v.rules.clone()),
         }
-    }
-}
-
-// We manually implement Debug for CascadeInputs so that we can avoid the
-// verbose stringification of ComputedValues for normal logging.
-impl fmt::Debug for CascadeInputs {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "CascadeInputs {{ rules: {:?}, visited_rules: {:?}, .. }}",
-               self.rules, self.visited_rules)
     }
 }
 
@@ -276,6 +282,7 @@ pub struct ElementCascadeInputs {
 
 impl ElementCascadeInputs {
     /// Construct inputs from previous cascade results, if any.
+    #[inline]
     pub fn new_from_element_data(data: &ElementData) -> Self {
         debug_assert!(data.has_styles());
         ElementCascadeInputs {
@@ -283,23 +290,6 @@ impl ElementCascadeInputs {
             pseudos: EagerPseudoCascadeInputs::new_from_style(&data.styles.pseudos),
         }
     }
-}
-
-/// Information about the current element being processed. We group this
-/// together into a single struct within ThreadLocalStyleContext so that we can
-/// instantiate and destroy it easily at the beginning and end of element
-/// processing.
-pub struct CurrentElementInfo {
-    /// The element being processed. Currently we use an OpaqueNode since we
-    /// only use this for identity checks, but we could use SendElement if there
-    /// were a good reason to.
-    element: OpaqueNode,
-    /// Whether the element is being styled for the first time.
-    is_initial_style: bool,
-    /// A Vec of possibly expired animations. Used only by Servo.
-    #[allow(dead_code)]
-    #[cfg(feature = "servo")]
-    pub possibly_expired_animations: Vec<PropertyAnimation>,
 }
 
 /// Statistics gathered during the traversal. We gather statistics on each
@@ -394,8 +384,9 @@ impl fmt::Display for TraversalStatistics {
 impl TraversalStatistics {
     /// Computes the traversal time given the start time in seconds.
     pub fn finish<E, D>(&mut self, traversal: &D, parallel: bool, start: f64)
-        where E: TElement,
-              D: DomTraversal<E>,
+    where
+        E: TElement,
+        D: DomTraversal<E>,
     {
         let threshold = traversal.shared_context().options.style_statistics_threshold;
         let stylist = traversal.shared_context().stylist;
@@ -421,15 +412,20 @@ impl TraversalStatistics {
 bitflags! {
     /// Represents which tasks are performed in a SequentialTask of
     /// UpdateAnimations which is a result of normal restyle.
-    pub flags UpdateAnimationsTasks: u8 {
+    pub struct UpdateAnimationsTasks: u8 {
         /// Update CSS Animations.
-        const CSS_ANIMATIONS = structs::UpdateAnimationsTasks_CSSAnimations,
+        const CSS_ANIMATIONS = structs::UpdateAnimationsTasks_CSSAnimations;
         /// Update CSS Transitions.
-        const CSS_TRANSITIONS = structs::UpdateAnimationsTasks_CSSTransitions,
+        const CSS_TRANSITIONS = structs::UpdateAnimationsTasks_CSSTransitions;
         /// Update effect properties.
-        const EFFECT_PROPERTIES = structs::UpdateAnimationsTasks_EffectProperties,
+        const EFFECT_PROPERTIES = structs::UpdateAnimationsTasks_EffectProperties;
         /// Update animation cacade results for animations running on the compositor.
-        const CASCADE_RESULTS = structs::UpdateAnimationsTasks_CascadeResults,
+        const CASCADE_RESULTS = structs::UpdateAnimationsTasks_CascadeResults;
+        /// Display property was changed from none.
+        /// Script animations keep alive on display:none elements, so we need to trigger
+        /// the second animation restyles for the script animations in the case where
+        /// the display property was changed from 'none' to others.
+        const DISPLAY_CHANGED_FROM_NONE = structs::UpdateAnimationsTasks_DisplayChangedFromNone;
     }
 }
 
@@ -437,11 +433,11 @@ bitflags! {
 bitflags! {
     /// Represents which tasks are performed in a SequentialTask as a result of
     /// animation-only restyle.
-    pub flags PostAnimationTasks: u8 {
+    pub struct PostAnimationTasks: u8 {
         /// Display property was changed from none in animation-only restyle so
         /// that we need to resolve styles for descendants in a subsequent
         /// normal restyle.
-        const DISPLAY_CHANGED_FROM_NONE_FOR_SMIL = 0x01,
+        const DISPLAY_CHANGED_FROM_NONE_FOR_SMIL = 0x01;
     }
 }
 
@@ -453,23 +449,27 @@ pub enum SequentialTask<E: TElement> {
     /// Entry to avoid an unused type parameter error on servo.
     Unused(SendElement<E>),
 
-    /// Performs one of a number of possible tasks related to updating animations based on the
-    /// |tasks| field. These include updating CSS animations/transitions that changed as part
-    /// of the non-animation style traversal, and updating the computed effect properties.
+    /// Performs one of a number of possible tasks related to updating
+    /// animations based on the |tasks| field. These include updating CSS
+    /// animations/transitions that changed as part of the non-animation style
+    /// traversal, and updating the computed effect properties.
     #[cfg(feature = "gecko")]
     UpdateAnimations {
         /// The target element or pseudo-element.
         el: SendElement<E>,
-        /// The before-change style for transitions. We use before-change style as the initial
-        /// value of its Keyframe. Required if |tasks| includes CSSTransitions.
+        /// The before-change style for transitions. We use before-change style
+        /// as the initial value of its Keyframe. Required if |tasks| includes
+        /// CSSTransitions.
         before_change_style: Option<Arc<ComputedValues>>,
         /// The tasks which are performed in this SequentialTask.
         tasks: UpdateAnimationsTasks
     },
 
-    /// Performs one of a number of possible tasks as a result of animation-only restyle.
-    /// Currently we do only process for resolving descendant elements that were display:none
-    /// subtree for SMIL animation.
+    /// Performs one of a number of possible tasks as a result of animation-only
+    /// restyle.
+    ///
+    /// Currently we do only process for resolving descendant elements that were
+    /// display:none subtree for SMIL animation.
     #[cfg(feature = "gecko")]
     PostAnimation {
         /// The target element.
@@ -483,31 +483,33 @@ impl<E: TElement> SequentialTask<E> {
     /// Executes this task.
     pub fn execute(self) {
         use self::SequentialTask::*;
-        debug_assert!(thread_state::get() == thread_state::LAYOUT);
+        debug_assert_eq!(thread_state::get(), ThreadState::LAYOUT);
         match self {
             Unused(_) => unreachable!(),
             #[cfg(feature = "gecko")]
             UpdateAnimations { el, before_change_style, tasks } => {
-                unsafe { el.update_animations(before_change_style, tasks) };
+                el.update_animations(before_change_style, tasks);
             }
             #[cfg(feature = "gecko")]
             PostAnimation { el, tasks } => {
-                unsafe { el.process_post_animation(tasks) };
+                el.process_post_animation(tasks);
             }
         }
     }
 
-    /// Creates a task to update various animation-related state on
-    /// a given (pseudo-)element.
+    /// Creates a task to update various animation-related state on a given
+    /// (pseudo-)element.
     #[cfg(feature = "gecko")]
-    pub fn update_animations(el: E,
-                             before_change_style: Option<Arc<ComputedValues>>,
-                             tasks: UpdateAnimationsTasks) -> Self {
+    pub fn update_animations(
+        el: E,
+        before_change_style: Option<Arc<ComputedValues>>,
+        tasks: UpdateAnimationsTasks,
+    ) -> Self {
         use self::SequentialTask::*;
         UpdateAnimations {
             el: unsafe { SendElement::new(el) },
-            before_change_style: before_change_style,
-            tasks: tasks,
+            before_change_style,
+            tasks,
         }
     }
 
@@ -518,7 +520,7 @@ impl<E: TElement> SequentialTask<E> {
         use self::SequentialTask::*;
         PostAnimation {
             el: unsafe { SendElement::new(el) },
-            tasks: tasks,
+            tasks,
         }
     }
 }
@@ -532,7 +534,7 @@ pub struct SelectorFlagsMap<E: TElement> {
     map: FnvHashMap<SendElement<E>, ElementSelectorFlags>,
     /// An LRU cache to avoid hashmap lookups, which can be slow if the map
     /// gets big.
-    cache: LRUCache<CacheItem<E>, [Entry<CacheItem<E>>; 4 + 1]>,
+    cache: LRUCache<[Entry<CacheItem<E>>; 4 + 1]>,
 }
 
 #[cfg(debug_assertions)]
@@ -555,23 +557,24 @@ impl<E: TElement> SelectorFlagsMap<E> {
     pub fn insert_flags(&mut self, element: E, flags: ElementSelectorFlags) {
         let el = unsafe { SendElement::new(element) };
         // Check the cache. If the flags have already been noted, we're done.
-        if self.cache.iter().find(|&(_, ref x)| x.0 == el)
-               .map_or(ElementSelectorFlags::empty(), |(_, x)| x.1)
-               .contains(flags) {
+        if let Some(item) = self.cache.find(|x| x.0 == el) {
+            if !item.1.contains(flags) {
+                item.1.insert(flags);
+                self.map.get_mut(&el).unwrap().insert(flags);
+            }
             return;
         }
 
         let f = self.map.entry(el).or_insert(ElementSelectorFlags::empty());
         *f |= flags;
 
-        // Insert into the cache. We don't worry about duplicate entries,
-        // which lets us avoid reshuffling.
         self.cache.insert((unsafe { SendElement::new(element) }, *f))
     }
 
     /// Applies the flags. Must be called on the main thread.
-    pub fn apply_flags(&mut self) {
-        debug_assert!(thread_state::get() == thread_state::LAYOUT);
+    fn apply_flags(&mut self) {
+        debug_assert_eq!(thread_state::get(), ThreadState::LAYOUT);
+        self.cache.evict_all();
         for (el, flags) in self.map.drain() {
             unsafe { el.set_selector_flags(flags); }
         }
@@ -608,7 +611,7 @@ where
     E: TElement,
 {
     fn drop(&mut self) {
-        debug_assert!(thread_state::get() == thread_state::LAYOUT);
+        debug_assert_eq!(thread_state::get(), ThreadState::LAYOUT);
         for task in self.0.drain(..) {
             task.execute()
         }
@@ -712,8 +715,6 @@ pub struct ThreadLocalStyleContext<E: TElement> {
     pub selector_flags: SelectorFlagsMap<E>,
     /// Statistics about the traversal.
     pub statistics: TraversalStatistics,
-    /// Information related to the current element, non-None during processing.
-    pub current_element_info: Option<CurrentElementInfo>,
     /// The struct used to compute and cache font metrics from style
     /// for evaluation of the font-relative em/ch units and font-size
     pub font_metrics_provider: E::FontMetricsProvider,
@@ -736,7 +737,6 @@ impl<E: TElement> ThreadLocalStyleContext<E> {
             tasks: SequentialTaskList(Vec::new()),
             selector_flags: SelectorFlagsMap::new(),
             statistics: TraversalStatistics::default(),
-            current_element_info: None,
             font_metrics_provider: E::FontMetricsProvider::create_from(shared),
             stack_limit_checker: StackLimitChecker::new(
                 (STYLE_THREAD_STACK_SIZE_KB - STACK_SAFETY_MARGIN_KB) * 1024),
@@ -754,56 +754,17 @@ impl<E: TElement> ThreadLocalStyleContext<E> {
             tasks: SequentialTaskList(Vec::new()),
             selector_flags: SelectorFlagsMap::new(),
             statistics: TraversalStatistics::default(),
-            current_element_info: None,
             font_metrics_provider: E::FontMetricsProvider::create_from(shared),
             stack_limit_checker: StackLimitChecker::new(
                 (STYLE_THREAD_STACK_SIZE_KB - STACK_SAFETY_MARGIN_KB) * 1024),
             nth_index_cache: NthIndexCache::default(),
         }
     }
-
-    #[cfg(feature = "gecko")]
-    /// Notes when the style system starts traversing an element.
-    pub fn begin_element(&mut self, element: E, data: &ElementData) {
-        debug_assert!(self.current_element_info.is_none());
-        self.current_element_info = Some(CurrentElementInfo {
-            element: element.as_node().opaque(),
-            is_initial_style: !data.has_styles(),
-        });
-    }
-
-    #[cfg(feature = "servo")]
-    /// Notes when the style system starts traversing an element.
-    pub fn begin_element(&mut self, element: E, data: &ElementData) {
-        debug_assert!(self.current_element_info.is_none());
-        self.current_element_info = Some(CurrentElementInfo {
-            element: element.as_node().opaque(),
-            is_initial_style: !data.has_styles(),
-            possibly_expired_animations: Vec::new(),
-        });
-    }
-
-    /// Notes when the style system finishes traversing an element.
-    pub fn end_element(&mut self, element: E) {
-        debug_assert!(self.current_element_info.is_some());
-        debug_assert!(self.current_element_info.as_ref().unwrap().element ==
-                      element.as_node().opaque());
-        self.current_element_info = None;
-    }
-
-    /// Returns true if the current element being traversed is being styled for
-    /// the first time.
-    ///
-    /// Panics if called while no element is being traversed.
-    pub fn is_initial_style(&self) -> bool {
-        self.current_element_info.as_ref().unwrap().is_initial_style
-    }
 }
 
 impl<E: TElement> Drop for ThreadLocalStyleContext<E> {
     fn drop(&mut self) {
-        debug_assert!(self.current_element_info.is_none());
-        debug_assert!(thread_state::get() == thread_state::LAYOUT);
+        debug_assert_eq!(thread_state::get(), ThreadState::LAYOUT);
 
         // Apply any slow selector flags that need to be set on parents.
         self.selector_flags.apply_flags();

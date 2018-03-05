@@ -35,13 +35,19 @@ pub unsafe fn trace(tracer: *mut JSTracer) {
     })
 }
 
+pub fn is_execution_stack_empty() -> bool {
+    STACK.with(|stack| {
+        stack.borrow().is_empty()
+    })
+}
+
 /// RAII struct that pushes and pops entries from the script settings stack.
 pub struct AutoEntryScript {
     global: DomRoot<GlobalScope>,
 }
 
 impl AutoEntryScript {
-    /// https://html.spec.whatwg.org/multipage/#prepare-to-run-script
+    /// <https://html.spec.whatwg.org/multipage/#prepare-to-run-script>
     pub fn new(global: &GlobalScope) -> Self {
         STACK.with(|stack| {
             trace!("Prepare to run script with {:p}", global);
@@ -58,7 +64,7 @@ impl AutoEntryScript {
 }
 
 impl Drop for AutoEntryScript {
-    /// https://html.spec.whatwg.org/multipage/#clean-up-after-running-script
+    /// <https://html.spec.whatwg.org/multipage/#clean-up-after-running-script>
     fn drop(&mut self) {
         STACK.with(|stack| {
             let mut stack = stack.borrow_mut();
@@ -96,7 +102,7 @@ pub struct AutoIncumbentScript {
 }
 
 impl AutoIncumbentScript {
-    /// https://html.spec.whatwg.org/multipage/#prepare-to-run-a-callback
+    /// <https://html.spec.whatwg.org/multipage/#prepare-to-run-a-callback>
     pub fn new(global: &GlobalScope) -> Self {
         // Step 2-3.
         unsafe {
@@ -120,7 +126,7 @@ impl AutoIncumbentScript {
 }
 
 impl Drop for AutoIncumbentScript {
-    /// https://html.spec.whatwg.org/multipage/#clean-up-after-running-a-callback
+    /// <https://html.spec.whatwg.org/multipage/#clean-up-after-running-a-callback>
     fn drop(&mut self) {
         STACK.with(|stack| {
             // Step 4.

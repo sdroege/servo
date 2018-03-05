@@ -2,7 +2,8 @@ import json
 import os
 import re
 from collections import defaultdict
-from six import iteritems, itervalues, viewkeys
+from six import iteritems, itervalues, viewkeys, string_types
+from tempfile import mkstemp
 
 from .item import ManualTest, WebdriverSpecTest, Stub, RefTestNode, RefTest, TestharnessTest, SupportFile, ConformanceCheckerTest, VisualTest
 from .log import get_logger
@@ -18,14 +19,6 @@ class ManifestError(Exception):
 
 class ManifestVersionMismatch(ManifestError):
     pass
-
-
-def sourcefile_items(args):
-    tests_root, url_base, rel_path, status = args
-    source_file = SourceFile(tests_root,
-                             rel_path,
-                             url_base)
-    return rel_path, source_file.manifest_items()
 
 
 class Manifest(object):
@@ -50,6 +43,15 @@ class Manifest(object):
         for type_tests in self._data.values():
             for test in type_tests.get(path, set()):
                 yield test
+
+    def iterdir(self, dir_name):
+        if not dir_name.endswith(os.path.sep):
+            dir_name = dir_name + os.path.sep
+        for type_tests in self._data.values():
+            for path, tests in type_tests.iteritems():
+                if path.startswith(dir_name):
+                    for test in tests:
+                        yield test
 
     @property
     def reftest_nodes_by_url(self):
@@ -89,6 +91,8 @@ class Manifest(object):
                     hash_changed = True
                 else:
                     new_type, manifest_items = old_type, self._data[old_type][rel_path]
+                if old_type == "reftest" and new_type != old_type:
+                    reftest_changes = True
             else:
                 new_type, manifest_items = source_file.manifest_items()
 
@@ -212,7 +216,7 @@ def load(tests_root, manifest):
     logger = get_logger()
 
     # "manifest" is a path or file-like object.
-    if isinstance(manifest, basestring):
+    if isinstance(manifest, string_types):
         if os.path.exists(manifest):
             logger.debug("Opening manifest at %s" % manifest)
         else:
@@ -228,6 +232,14 @@ def load(tests_root, manifest):
 
 
 def write(manifest, manifest_path):
-    with open(manifest_path, "wb") as f:
-        json.dump(manifest.to_json(), f, sort_keys=True, indent=1, separators=(',', ': '))
-        f.write("\n")
+    dir_name = os.path.dirname(manifest_path)
+    if not os.path.exists(dir_name):
+        os.makedirs(dir_name)
+
+    fd, temp_manifest_path = mkstemp(dir=dir_name)
+    temp_manifest = open(temp_manifest_path, "wb")
+    json.dump(manifest.to_json(), temp_manifest,
+              sort_keys=True, indent=1, separators=(',', ': '))
+    temp_manifest.write("\n")
+    os.rename(temp_manifest_path, manifest_path)
+    os.close(fd)

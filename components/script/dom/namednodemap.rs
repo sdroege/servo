@@ -15,7 +15,6 @@ use dom::element::Element;
 use dom::window::Window;
 use dom_struct::dom_struct;
 use html5ever::LocalName;
-use std::ascii::AsciiExt;
 
 #[dom_struct]
 pub struct NamedNodeMap {
@@ -32,7 +31,7 @@ impl NamedNodeMap {
     }
 
     pub fn new(window: &Window, elem: &Element) -> DomRoot<NamedNodeMap> {
-        reflect_dom_object(box NamedNodeMap::new_inherited(elem),
+        reflect_dom_object(Box::new(NamedNodeMap::new_inherited(elem)),
                            window, NamedNodeMapBinding::Wrap)
     }
 }

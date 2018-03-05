@@ -5,15 +5,16 @@
 //! `<length>` computed values, and related ones.
 
 use app_units::Au;
+use logical_geometry::WritingMode;
 use ordered_float::NotNaN;
-use std::fmt;
+use properties::LonghandId;
+use std::fmt::{self, Write};
 use std::ops::{Add, Neg};
-use style_traits::ToCss;
+use style_traits::{CssWriter, ToCss};
 use style_traits::values::specified::AllowedNumericType;
 use super::{Number, ToComputedValue, Context, Percentage};
-use values::{Auto, CSSFloat, Either, ExtremumLength, None_, Normal, specified};
-use values::animated::{Animate, Procedure, ToAnimatedZero};
-use values::computed::NonNegativeNumber;
+use values::{Auto, CSSFloat, Either, Normal, specified};
+use values::animated::{Animate, Procedure, ToAnimatedValue, ToAnimatedZero};
 use values::distance::{ComputeSquaredDistance, SquaredDistance};
 use values::generics::NonNegative;
 use values::specified::length::{AbsoluteLength, FontBaseSize, FontRelativeLength};
@@ -36,9 +37,6 @@ impl ToComputedValue for specified::NoCalcLength {
                 length.to_computed_value(context.viewport_size_for_viewport_unit_resolution()),
             specified::NoCalcLength::ServoCharacterWidth(length) =>
                 length.to_computed_value(context.style().get_font().clone_font_size().size()),
-            #[cfg(feature = "gecko")]
-            specified::NoCalcLength::Physical(length) =>
-                length.to_computed_value(context),
         }
     }
 
@@ -66,9 +64,7 @@ impl ToComputedValue for specified::Length {
 }
 
 #[allow(missing_docs)]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Clone, Copy, Debug, PartialEq, ToAnimatedZero)]
+#[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq, ToAnimatedZero)]
 pub struct CalcLengthOrPercentage {
     #[animation(constant)]
     pub clamping_mode: AllowedNumericType,
@@ -97,15 +93,12 @@ impl CalcLengthOrPercentage {
 
     /// Returns a new `CalcLengthOrPercentage` with a specific clamping mode.
     #[inline]
-    pub fn with_clamping_mode(length: Length,
-                              percentage: Option<Percentage>,
-                              clamping_mode: AllowedNumericType)
-                              -> Self {
-        Self {
-            clamping_mode: clamping_mode,
-            length: length,
-            percentage: percentage,
-        }
+    pub fn with_clamping_mode(
+        length: Length,
+        percentage: Option<Percentage>,
+        clamping_mode: AllowedNumericType,
+    ) -> Self {
+        Self { clamping_mode, length, percentage, }
     }
 
     /// Returns this `calc()` as a `<length>`.
@@ -141,8 +134,9 @@ impl CalcLengthOrPercentage {
         self.to_pixel_length(container_len).map(Au::from)
     }
 
-    /// If there are special rules for computing percentages in a value (e.g. the height property),
-    /// they apply whenever a calc() expression contains percentages.
+    /// If there are special rules for computing percentages in a value (e.g.
+    /// the height property), they apply whenever a calc() expression contains
+    /// percentages.
     pub fn to_pixel_length(&self, container_len: Option<Au>) -> Option<Length> {
         match (container_len, self.percentage) {
             (Some(len), Some(percent)) => {
@@ -210,7 +204,10 @@ impl From<LengthOrPercentageOrNone> for Option<CalcLengthOrPercentage> {
 }
 
 impl ToCss for CalcLengthOrPercentage {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         use num_traits::Zero;
 
         let (length, percentage) = match (self.length, self.percentage) {
@@ -231,9 +228,15 @@ impl ToCss for CalcLengthOrPercentage {
 
 impl specified::CalcLengthOrPercentage {
     /// Compute the value, zooming any absolute units by the zoom function.
-    fn to_computed_value_with_zoom<F>(&self, context: &Context, zoom_fn: F,
-                                      base_size: FontBaseSize) -> CalcLengthOrPercentage
-        where F: Fn(Length) -> Length {
+    fn to_computed_value_with_zoom<F>(
+        &self,
+        context: &Context,
+        zoom_fn: F,
+        base_size: FontBaseSize,
+    ) -> CalcLengthOrPercentage
+    where
+        F: Fn(Length) -> Length,
+    {
         use std::f32;
         let mut length = 0.;
 
@@ -268,8 +271,30 @@ impl specified::CalcLengthOrPercentage {
     }
 
     /// Compute font-size or line-height taking into account text-zoom if necessary.
-    pub fn to_computed_value_zoomed(&self, context: &Context, base_size: FontBaseSize) -> CalcLengthOrPercentage {
+    pub fn to_computed_value_zoomed(
+        &self,
+        context: &Context,
+        base_size: FontBaseSize,
+    ) -> CalcLengthOrPercentage {
         self.to_computed_value_with_zoom(context, |abs| context.maybe_zoom_text(abs.into()).0, base_size)
+    }
+
+    /// Compute the value into pixel length as CSSFloat without context,
+    /// so it returns Err(()) if there is any non-absolute unit.
+    pub fn to_computed_pixel_length_without_context(&self) -> Result<CSSFloat, ()> {
+        if self.vw.is_some() || self.vh.is_some() || self.vmin.is_some() || self.vmax.is_some() ||
+           self.em.is_some() || self.ex.is_some() || self.ch.is_some() || self.rem.is_some() ||
+           self.percentage.is_some() {
+            return Err(());
+        }
+
+        match self.absolute {
+            Some(abs) => Ok(abs.to_px()),
+            None => {
+                debug_assert!(false, "Someone forgot to handle an unit here: {:?}", self);
+                Err(())
+            }
+        }
     }
 }
 
@@ -294,10 +319,8 @@ impl ToComputedValue for specified::CalcLengthOrPercentage {
 
 #[allow(missing_docs)]
 #[animate(fallback = "Self::animate_fallback")]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 #[css(derive_debug)]
-#[derive(Animate, Clone, ComputeSquaredDistance, Copy, PartialEq)]
+#[derive(Animate, Clone, ComputeSquaredDistance, Copy, MallocSizeOf, PartialEq)]
 #[derive(ToAnimatedZero, ToCss)]
 #[distance(fallback = "Self::compute_squared_distance_fallback")]
 pub enum LengthOrPercentage {
@@ -307,7 +330,7 @@ pub enum LengthOrPercentage {
 }
 
 impl LengthOrPercentage {
-    /// https://drafts.csswg.org/css-transitions/#animtype-lpcalc
+    /// <https://drafts.csswg.org/css-transitions/#animtype-lpcalc>
     fn animate_fallback(
         &self,
         other: &Self,
@@ -452,10 +475,8 @@ impl ToComputedValue for specified::LengthOrPercentage {
 
 #[allow(missing_docs)]
 #[animate(fallback = "Self::animate_fallback")]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
 #[css(derive_debug)]
-#[derive(Animate, Clone, ComputeSquaredDistance, Copy, PartialEq, ToCss)]
+#[derive(Animate, Clone, ComputeSquaredDistance, Copy, MallocSizeOf, PartialEq, ToCss)]
 #[distance(fallback = "Self::compute_squared_distance_fallback")]
 pub enum LengthOrPercentageOrAuto {
     Length(Length),
@@ -465,7 +486,7 @@ pub enum LengthOrPercentageOrAuto {
 }
 
 impl LengthOrPercentageOrAuto {
-    /// https://drafts.csswg.org/css-transitions/#animtype-lpcalc
+    /// <https://drafts.csswg.org/css-transitions/#animtype-lpcalc>
     fn animate_fallback(
         &self,
         other: &Self,
@@ -549,7 +570,7 @@ impl ToComputedValue for specified::LengthOrPercentageOrAuto {
 
 #[allow(missing_docs)]
 #[animate(fallback = "Self::animate_fallback")]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[cfg_attr(feature = "servo", derive(MallocSizeOf))]
 #[css(derive_debug)]
 #[derive(Animate, Clone, ComputeSquaredDistance, Copy, PartialEq, ToCss)]
 #[distance(fallback = "Self::compute_squared_distance_fallback")]
@@ -561,7 +582,7 @@ pub enum LengthOrPercentageOrNone {
 }
 
 impl LengthOrPercentageOrNone {
-    /// https://drafts.csswg.org/css-transitions/#animtype-lpcalc
+    /// <https://drafts.csswg.org/css-transitions/#animtype-lpcalc>
     fn animate_fallback(
         &self,
         other: &Self,
@@ -642,6 +663,20 @@ impl ToComputedValue for specified::LengthOrPercentageOrNone {
 /// A wrapper of LengthOrPercentage, whose value must be >= 0.
 pub type NonNegativeLengthOrPercentage = NonNegative<LengthOrPercentage>;
 
+impl ToAnimatedValue for NonNegativeLengthOrPercentage {
+    type AnimatedValue = LengthOrPercentage;
+
+    #[inline]
+    fn to_animated_value(self) -> Self::AnimatedValue {
+        self.into()
+    }
+
+    #[inline]
+    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
+        animated.clamp_to_non_negative().into()
+    }
+}
+
 impl From<NonNegativeLength> for NonNegativeLengthOrPercentage {
     #[inline]
     fn from(length: NonNegativeLength) -> Self {
@@ -684,9 +719,8 @@ impl NonNegativeLengthOrPercentage {
 }
 
 /// The computed `<length>` value.
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(Deserialize, HeapSizeOf, Serialize))]
-#[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug, PartialEq, PartialOrd)]
+#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
+#[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug, MallocSizeOf, PartialEq, PartialOrd)]
 #[derive(ToAnimatedValue, ToAnimatedZero)]
 pub struct CSSPixelLength(CSSFloat);
 
@@ -713,11 +747,19 @@ impl CSSPixelLength {
     pub fn abs(self) -> Self {
         CSSPixelLength::new(self.0.abs())
     }
+
+    /// Zero value
+    pub fn zero() -> Self {
+        CSSPixelLength::new(0.)
+    }
 }
 
 impl ToCss for CSSPixelLength {
     #[inline]
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         self.0.to_css(dest)?;
         dest.write_str("px")
     }
@@ -749,9 +791,6 @@ impl From<Au> for CSSPixelLength {
 /// An alias of computed `<length>` value.
 pub type Length = CSSPixelLength;
 
-/// Either a computed `<length>` or the `none` keyword.
-pub type LengthOrNone = Either<Length, None_>;
-
 /// Either a computed `<length>` or the `auto` keyword.
 pub type LengthOrAuto = Either<Length, Auto>;
 
@@ -771,6 +810,20 @@ pub type LengthOrNormal = Either<Length, Normal>;
 
 /// A wrapper of Length, whose value must be >= 0.
 pub type NonNegativeLength = NonNegative<Length>;
+
+impl ToAnimatedValue for NonNegativeLength {
+    type AnimatedValue = Length;
+
+    #[inline]
+    fn to_animated_value(self) -> Self::AnimatedValue {
+        self.0
+    }
+
+    #[inline]
+    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
+        NonNegativeLength::new(animated.px().max(0.))
+    }
+}
 
 impl NonNegativeLength {
     /// Create a NonNegativeLength.
@@ -844,13 +897,61 @@ pub type NonNegativeLengthOrAuto = Either<NonNegativeLength, Auto>;
 /// Either a computed NonNegativeLength or the `normal` keyword.
 pub type NonNegativeLengthOrNormal = Either<NonNegativeLength, Normal>;
 
-/// Either a computed NonNegativeLength or a NonNegativeNumber value.
-pub type NonNegativeLengthOrNumber = Either<NonNegativeLength, NonNegativeNumber>;
+/// A type for possible values for min- and max- flavors of width, height,
+/// block-size, and inline-size.
+#[allow(missing_docs)]
+#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
+#[derive(Clone, Copy, Debug, Eq, MallocSizeOf, Parse, PartialEq, ToCss)]
+pub enum ExtremumLength {
+    MozMaxContent,
+    MozMinContent,
+    MozFitContent,
+    MozAvailable,
+}
 
-/// A value suitable for a `min-width`, `min-height`, `width` or `height` property.
+impl ExtremumLength {
+    /// Returns whether this size keyword can be used for the given writing-mode
+    /// and property.
+    ///
+    /// TODO: After these values are supported for both axes (and maybe
+    /// unprefixed, see bug 1322780) all this complexity can go away, and
+    /// everything can be derived (no need for uncacheable stuff).
+    fn valid_for(&self, wm: WritingMode, longhand: LonghandId) -> bool {
+        // We only make sense on the inline axis.
+        match longhand {
+            // FIXME(emilio): The flex-basis thing is not quite clear...
+            LonghandId::FlexBasis |
+            LonghandId::MinWidth |
+            LonghandId::MaxWidth |
+            LonghandId::Width => !wm.is_vertical(),
+
+            LonghandId::MinHeight |
+            LonghandId::MaxHeight |
+            LonghandId::Height => wm.is_vertical(),
+
+            LonghandId::MinInlineSize |
+            LonghandId::MaxInlineSize |
+            LonghandId::InlineSize => true,
+            // The block-* properties are rejected at parse-time, so they're
+            // unexpected here.
+            _ => {
+                debug_assert!(
+                    false,
+                    "Unexpected property using ExtremumLength: {:?}",
+                    longhand,
+                );
+                false
+            }
+        }
+    }
+}
+
+/// A value suitable for a `min-width`, `min-height`, `width` or `height`
+/// property.
+///
 /// See values/specified/length.rs for more details.
 #[allow(missing_docs)]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[cfg_attr(feature = "servo", derive(MallocSizeOf))]
 #[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug, PartialEq)]
 #[derive(ToAnimatedZero, ToCss)]
 pub enum MozLength {
@@ -861,6 +962,7 @@ pub enum MozLength {
 
 impl MozLength {
     /// Returns the `auto` value.
+    #[inline]
     pub fn auto() -> Self {
         MozLength::LengthOrPercentageOrAuto(LengthOrPercentageOrAuto::Auto)
     }
@@ -871,16 +973,22 @@ impl ToComputedValue for specified::MozLength {
 
     #[inline]
     fn to_computed_value(&self, context: &Context) -> MozLength {
+        debug_assert!(
+            context.for_non_inherited_property.is_some(),
+            "Someone added a MozLength to an inherited property? Evil!"
+        );
         match *self {
             specified::MozLength::LengthOrPercentageOrAuto(ref lopoa) => {
                 MozLength::LengthOrPercentageOrAuto(lopoa.to_computed_value(context))
             }
-            specified::MozLength::ExtremumLength(ref ext) => {
-                debug_assert!(context.for_non_inherited_property.is_some(),
-                              "should check whether we're a non-inherited property");
+            specified::MozLength::ExtremumLength(ext) => {
                 context.rule_cache_conditions.borrow_mut()
                     .set_writing_mode_dependency(context.builder.writing_mode);
-                MozLength::ExtremumLength(ext.clone())
+                if !ext.valid_for(context.builder.writing_mode, context.for_non_inherited_property.unwrap()) {
+                    MozLength::auto()
+                } else {
+                    MozLength::ExtremumLength(ext)
+                }
             }
         }
     }
@@ -888,11 +996,14 @@ impl ToComputedValue for specified::MozLength {
     #[inline]
     fn from_computed_value(computed: &MozLength) -> Self {
         match *computed {
-            MozLength::LengthOrPercentageOrAuto(ref lopoa) =>
+            MozLength::LengthOrPercentageOrAuto(ref lopoa) => {
                 specified::MozLength::LengthOrPercentageOrAuto(
-                    specified::LengthOrPercentageOrAuto::from_computed_value(&lopoa)),
-            MozLength::ExtremumLength(ref ext) =>
-                specified::MozLength::ExtremumLength(ext.clone()),
+                    specified::LengthOrPercentageOrAuto::from_computed_value(lopoa)
+                )
+            },
+            MozLength::ExtremumLength(ext) => {
+                specified::MozLength::ExtremumLength(ext)
+            }
         }
     }
 }
@@ -900,7 +1011,7 @@ impl ToComputedValue for specified::MozLength {
 /// A value suitable for a `max-width` or `max-height` property.
 /// See values/specified/length.rs for more details.
 #[allow(missing_docs)]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[cfg_attr(feature = "servo", derive(MallocSizeOf))]
 #[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug, PartialEq, ToCss)]
 pub enum MaxLength {
     LengthOrPercentageOrNone(LengthOrPercentageOrNone),
@@ -910,21 +1021,33 @@ pub enum MaxLength {
 
 impl MaxLength {
     /// Returns the `none` value.
+    #[inline]
     pub fn none() -> Self {
         MaxLength::LengthOrPercentageOrNone(LengthOrPercentageOrNone::None)
     }
 }
+
 impl ToComputedValue for specified::MaxLength {
     type ComputedValue = MaxLength;
 
     #[inline]
     fn to_computed_value(&self, context: &Context) -> MaxLength {
+        debug_assert!(
+            context.for_non_inherited_property.is_some(),
+            "Someone added a MaxLength to an inherited property? Evil!"
+        );
         match *self {
             specified::MaxLength::LengthOrPercentageOrNone(ref lopon) => {
                 MaxLength::LengthOrPercentageOrNone(lopon.to_computed_value(context))
             }
-            specified::MaxLength::ExtremumLength(ref ext) => {
-                MaxLength::ExtremumLength(ext.clone())
+            specified::MaxLength::ExtremumLength(ext) => {
+                context.rule_cache_conditions.borrow_mut()
+                    .set_writing_mode_dependency(context.builder.writing_mode);
+                if !ext.valid_for(context.builder.writing_mode, context.for_non_inherited_property.unwrap()) {
+                    MaxLength::none()
+                } else {
+                    MaxLength::ExtremumLength(ext)
+                }
             }
         }
     }

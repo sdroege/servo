@@ -13,6 +13,7 @@ use dom::bindings::inheritance::Castable;
 use dom::bindings::refcounted::Trusted;
 use dom::bindings::reflector::{Reflector, reflect_dom_object};
 use dom::bindings::root::{Dom, DomRoot, MutNullableDom, RootedReference};
+use dom::bindings::settings_stack::is_execution_stack_empty;
 use dom::bindings::str::DOMString;
 use dom::characterdata::CharacterData;
 use dom::comment::Comment;
@@ -46,7 +47,6 @@ use script_traits::DocumentActivity;
 use servo_config::prefs::PREFS;
 use servo_config::resource_files::read_resource_file;
 use servo_url::ServoUrl;
-use std::ascii::AsciiExt;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::mem;
@@ -74,13 +74,13 @@ pub struct ServoParser {
     /// The document associated with this parser.
     document: Dom<Document>,
     /// Input received from network.
-    #[ignore_heap_size_of = "Defined in html5ever"]
+    #[ignore_malloc_size_of = "Defined in html5ever"]
     network_input: DomRefCell<BufferQueue>,
     /// Part of an UTF-8 code point spanning input chunks
-    #[ignore_heap_size_of = "Defined in html5ever"]
+    #[ignore_malloc_size_of = "Defined in html5ever"]
     incomplete_utf8: DomRefCell<Option<IncompleteUtf8>>,
     /// Input received from script. Used only to support document.write().
-    #[ignore_heap_size_of = "Defined in html5ever"]
+    #[ignore_malloc_size_of = "Defined in html5ever"]
     script_input: DomRefCell<BufferQueue>,
     /// The tokenizer of this parser.
     tokenizer: DomRefCell<Tokenizer>,
@@ -88,11 +88,11 @@ pub struct ServoParser {
     last_chunk_received: Cell<bool>,
     /// Whether this parser should avoid passing any further data to the tokenizer.
     suspended: Cell<bool>,
-    /// https://html.spec.whatwg.org/multipage/#script-nesting-level
+    /// <https://html.spec.whatwg.org/multipage/#script-nesting-level>
     script_nesting_level: Cell<usize>,
-    /// https://html.spec.whatwg.org/multipage/#abort-a-parser
+    /// <https://html.spec.whatwg.org/multipage/#abort-a-parser>
     aborted: Cell<bool>,
-    /// https://html.spec.whatwg.org/multipage/#script-created-parser
+    /// <https://html.spec.whatwg.org/multipage/#script-created-parser>
     script_created_parser: bool,
 }
 
@@ -102,7 +102,31 @@ enum LastChunkState {
     NotReceived,
 }
 
+pub struct ElementAttribute {
+    name: QualName,
+    value: DOMString
+}
+
+#[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
+pub enum ParsingAlgorithm {
+    Normal,
+    Fragment,
+}
+
+impl ElementAttribute {
+    pub fn new(name: QualName, value: DOMString) -> ElementAttribute {
+        ElementAttribute {
+            name: name,
+            value: value
+        }
+    }
+}
+
 impl ServoParser {
+    pub fn parser_is_not_active(&self) -> bool {
+        self.can_write() || self.tokenizer.try_borrow_mut().is_ok()
+    }
+
     pub fn parse_html_document(document: &Document, input: DOMString, url: ServoUrl) {
         let parser = if PREFS.get("dom.servoparser.async_html_tokenizer.enabled").as_boolean().unwrap() {
             ServoParser::new(document,
@@ -111,7 +135,7 @@ impl ServoParser {
                              ParserKind::Normal)
         } else {
             ServoParser::new(document,
-                             Tokenizer::Html(self::html::Tokenizer::new(document, url, None)),
+                             Tokenizer::Html(self::html::Tokenizer::new(document, url, None, ParsingAlgorithm::Normal)),
                              LastChunkState::NotReceived,
                              ParserKind::Normal)
         };
@@ -139,7 +163,8 @@ impl ServoParser {
                                      DocumentSource::FromParser,
                                      loader,
                                      None,
-                                     None);
+                                     None,
+                                     Default::default());
 
         // Step 2.
         document.set_quirks_mode(context_document.quirks_mode());
@@ -156,7 +181,8 @@ impl ServoParser {
         let parser = ServoParser::new(&document,
                                       Tokenizer::Html(self::html::Tokenizer::new(&document,
                                                                                  url,
-                                                                                 Some(fragment_context))),
+                                                                                 Some(fragment_context),
+                                                                                 ParsingAlgorithm::Fragment)),
                                       LastChunkState::Received,
                                       ParserKind::Normal);
         parser.parse_string_chunk(String::from(input));
@@ -169,10 +195,17 @@ impl ServoParser {
     }
 
     pub fn parse_html_script_input(document: &Document, url: ServoUrl, type_: &str) {
-        let parser = ServoParser::new(document,
-                                      Tokenizer::Html(self::html::Tokenizer::new(document, url, None)),
-                                      LastChunkState::NotReceived,
-                                      ParserKind::ScriptCreated);
+        let parser = ServoParser::new(
+            document,
+            Tokenizer::Html(self::html::Tokenizer::new(
+                document,
+                url,
+                None,
+                ParsingAlgorithm::Normal,
+            )),
+            LastChunkState::NotReceived,
+            ParserKind::ScriptCreated,
+        );
         document.set_current_parser(Some(&parser));
         if !type_.eq_ignore_ascii_case("text/html") {
             parser.parse_string_chunk("<pre>\n".to_owned());
@@ -198,7 +231,7 @@ impl ServoParser {
 
     /// Corresponds to the latter part of the "Otherwise" branch of the 'An end
     /// tag whose tag name is "script"' of
-    /// https://html.spec.whatwg.org/multipage/#parsing-main-incdata
+    /// <https://html.spec.whatwg.org/multipage/#parsing-main-incdata>
     ///
     /// This first moves everything from the script input to the beginning of
     /// the network input, effectively resetting the insertion point to just
@@ -338,7 +371,7 @@ impl ServoParser {
            last_chunk_state: LastChunkState,
            kind: ParserKind)
            -> DomRoot<Self> {
-        reflect_dom_object(box ServoParser::new_inherited(document, tokenizer, last_chunk_state, kind),
+        reflect_dom_object(Box::new(ServoParser::new_inherited(document, tokenizer, last_chunk_state, kind)),
                            document.window(),
                            ServoParserBinding::Wrap)
     }
@@ -480,10 +513,7 @@ impl<I> Iterator for FragmentParsingResult<I>
     type Item = DomRoot<Node>;
 
     fn next(&mut self) -> Option<DomRoot<Node>> {
-        let next = match self.inner.next() {
-            Some(next) => next,
-            None => return None,
-        };
+        let next = self.inner.next()?;
         next.remove_self();
         Some(next)
     }
@@ -493,13 +523,13 @@ impl<I> Iterator for FragmentParsingResult<I>
     }
 }
 
-#[derive(HeapSizeOf, JSTraceable, PartialEq)]
+#[derive(JSTraceable, MallocSizeOf, PartialEq)]
 enum ParserKind {
     Normal,
     ScriptCreated,
 }
 
-#[derive(HeapSizeOf, JSTraceable)]
+#[derive(JSTraceable, MallocSizeOf)]
 #[must_root]
 enum Tokenizer {
     Html(self::html::Tokenizer),
@@ -656,13 +686,11 @@ impl FetchResponseListener for ParserContext {
                     parser.parse_sync();
                 }
             },
-            Some(ContentType(Mime(TopLevel::Text, SubLevel::Xml, _))) => {}, // Handle text/xml
+            Some(ContentType(Mime(TopLevel::Text, SubLevel::Xml, _))) | // Handle text/xml, application/xml
+            Some(ContentType(Mime(TopLevel::Application, SubLevel::Xml, _))) => {},
+            Some(ContentType(Mime(TopLevel::Application, SubLevel::Ext(ref sub), _)))
+                if sub.as_str() == "xhtml+xml".to_owned() => {}, // Handle xhtml (application/xhtml+xml)
             Some(ContentType(Mime(toplevel, sublevel, _))) => {
-                if toplevel.as_str() == "application" && sublevel.as_str() == "xhtml+xml" {
-                    // Handle xhtml (application/xhtml+xml).
-                    return;
-                }
-
                 // Show warning page for unknown mime types.
                 let page = format!("<html><body><p>Unknown content type ({}/{}).</p></body></html>",
                                    toplevel.as_str(),
@@ -742,13 +770,27 @@ fn insert(parent: &Node, reference_child: Option<&Node>, child: NodeOrText<Dom<N
     }
 }
 
-#[derive(HeapSizeOf, JSTraceable)]
+#[derive(JSTraceable, MallocSizeOf)]
 #[must_root]
 pub struct Sink {
     base_url: ServoUrl,
     document: Dom<Document>,
     current_line: u64,
     script: MutNullableDom<HTMLScriptElement>,
+    parsing_algorithm: ParsingAlgorithm,
+}
+
+impl Sink {
+    fn same_tree(&self, x: &Dom<Node>, y: &Dom<Node>) -> bool {
+        let x = x.downcast::<Element>().expect("Element node expected");
+        let y = y.downcast::<Element>().expect("Element node expected");
+
+        x.is_in_same_home_subtree(y)
+    }
+
+    fn has_parent_node(&self, node: &Dom<Node>) -> bool {
+         node.GetParentNode().is_some()
+    }
 }
 
 #[allow(unrooted_must_root)]  // FIXME: really?
@@ -781,30 +823,20 @@ impl TreeSink for Sink {
         }
     }
 
-    fn same_tree(&self, x: &Dom<Node>, y: &Dom<Node>) -> bool {
-        let x = x.downcast::<Element>().expect("Element node expected");
-        let y = y.downcast::<Element>().expect("Element node expected");
-
-        x.is_in_same_home_subtree(y)
-    }
-
     fn create_element(&mut self, name: QualName, attrs: Vec<Attribute>, _flags: ElementFlags)
             -> Dom<Node> {
-        let is = attrs.iter()
-                      .find(|attr| attr.name.local.eq_str_ignore_ascii_case("is"))
-                      .map(|attr| LocalName::from(&*attr.value));
-
-        let elem = Element::create(name,
-                                   is,
-                                   &*self.document,
-                                   ElementCreator::ParserCreated(self.current_line),
-                                   CustomElementCreationMode::Synchronous);
-
-        for attr in attrs {
-            elem.set_attribute_from_parser(attr.name, DOMString::from(String::from(attr.value)), None);
-        }
-
-        Dom::from_ref(elem.upcast())
+        let attrs = attrs
+            .into_iter()
+            .map(|attr| ElementAttribute::new(attr.name, DOMString::from(String::from(attr.value))))
+            .collect();
+        let element = create_element_for_token(
+            name,
+            attrs,
+            &*self.document,
+            ElementCreator::ParserCreated(self.current_line),
+            self.parsing_algorithm,
+        );
+        Dom::from_ref(element.upcast())
     }
 
     fn create_comment(&mut self, text: StrTendril) -> Dom<Node> {
@@ -818,10 +850,6 @@ impl TreeSink for Sink {
             DOMString::from(String::from(target)), DOMString::from(String::from(data)),
             doc);
         Dom::from_ref(pi.upcast())
-    }
-
-    fn has_parent_node(&self, node: &Dom<Node>) -> bool {
-         node.GetParentNode().is_some()
     }
 
     fn associate_with_form(&mut self, target: &Dom<Node>, form: &Dom<Node>, nodes: (&Dom<Node>, Option<&Dom<Node>>)) {
@@ -844,7 +872,7 @@ impl TreeSink for Sink {
             control.set_form_owner_from_parser(&form);
         } else {
             // TODO remove this code when keygen is implemented.
-            assert!(node.NodeName() == "KEYGEN", "Unknown form-associatable element");
+            assert_eq!(node.NodeName(), "KEYGEN", "Unknown form-associatable element");
         }
     }
 
@@ -930,7 +958,7 @@ impl TreeSink for Sink {
         }
     }
 
-    /// https://html.spec.whatwg.org/multipage/#html-integration-point
+    /// <https://html.spec.whatwg.org/multipage/#html-integration-point>
     /// Specifically, the <annotation-xml> cases.
     fn is_mathml_annotation_xml_integration_point(&self, handle: &Dom<Node>) -> bool {
         let elem = handle.downcast::<Element>().unwrap();
@@ -948,4 +976,65 @@ impl TreeSink for Sink {
         let node = DomRoot::from_ref(&**node);
         vtable_for(&node).pop();
     }
+}
+
+/// https://html.spec.whatwg.org/multipage/#create-an-element-for-the-token
+fn create_element_for_token(
+    name: QualName,
+    attrs: Vec<ElementAttribute>,
+    document: &Document,
+    creator: ElementCreator,
+    parsing_algorithm: ParsingAlgorithm,
+) -> DomRoot<Element> {
+    // Step 3.
+    let is = attrs.iter()
+        .find(|attr| attr.name.local.eq_str_ignore_ascii_case("is"))
+        .map(|attr| LocalName::from(&*attr.value));
+
+    // Step 4.
+    let definition = document.lookup_custom_element_definition(&name.ns, &name.local, is.as_ref());
+
+    // Step 5.
+    let will_execute_script = definition.is_some() && parsing_algorithm != ParsingAlgorithm::Fragment;
+
+    // Step 6.
+    if will_execute_script {
+        // Step 6.1.
+        document.increment_throw_on_dynamic_markup_insertion_counter();
+        // Step 6.2
+        if is_execution_stack_empty() {
+            document.window().upcast::<GlobalScope>().perform_a_microtask_checkpoint();
+        }
+        // Step 6.3
+        ScriptThread::push_new_element_queue()
+    }
+
+    // Step 7.
+    let creation_mode = if will_execute_script {
+        CustomElementCreationMode::Synchronous
+    } else {
+        CustomElementCreationMode::Asynchronous
+    };
+    let element = Element::create(name, is, document, creator, creation_mode);
+
+    // Step 8.
+    for attr in attrs {
+        element.set_attribute_from_parser(attr.name, attr.value, None);
+    }
+
+    // Step 9.
+    if will_execute_script {
+        // Steps 9.1 - 9.2.
+        ScriptThread::pop_current_element_queue();
+        // Step 9.3.
+        document.decrement_throw_on_dynamic_markup_insertion_counter();
+    }
+
+    // TODO: Step 10.
+    // TODO: Step 11.
+
+    // Step 12 is handled in `associate_with_form`.
+
+    // Step 13.
+    element
 }

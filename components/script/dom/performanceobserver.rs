@@ -32,7 +32,7 @@ const VALID_ENTRY_TYPES: &'static [&'static str] = &[
 #[dom_struct]
 pub struct PerformanceObserver {
     reflector_: Reflector,
-    #[ignore_heap_size_of = "can't measure Rc values"]
+    #[ignore_malloc_size_of = "can't measure Rc values"]
     callback: Rc<PerformanceObserverCallback>,
     entries: DomRefCell<DOMPerformanceEntryList>,
 }
@@ -54,7 +54,7 @@ impl PerformanceObserver {
                entries: DOMPerformanceEntryList)
         -> DomRoot<PerformanceObserver> {
         let observer = PerformanceObserver::new_inherited(callback, DomRefCell::new(entries));
-        reflect_dom_object(box observer, global, PerformanceObserverBinding::Wrap)
+        reflect_dom_object(Box::new(observer), global, PerformanceObserverBinding::Wrap)
     }
 
     pub fn Constructor(global: &GlobalScope, callback: Rc<PerformanceObserverCallback>)
@@ -106,7 +106,7 @@ impl PerformanceObserverMethods for PerformanceObserver {
         // step 2
         // There must be at least one valid entry type.
         if entry_types.is_empty() {
-            return Err((Error::Type("entryTypes cannot be empty".to_string())));
+            return Err(Error::Type("entryTypes cannot be empty".to_string()));
         }
 
         // step 3-4-5

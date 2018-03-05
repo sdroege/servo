@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use core::nonzero::NonZero;
 use dom::bindings::cell::DomRefCell;
 use dom::bindings::codegen::Bindings::CryptoBinding;
 use dom::bindings::codegen::Bindings::CryptoBinding::CryptoMethods;
@@ -14,6 +13,7 @@ use dom_struct::dom_struct;
 use js::jsapi::{JSContext, JSObject};
 use js::jsapi::Type;
 use servo_rand::{ServoRng, Rng};
+use std::ptr::NonNull;
 
 unsafe_no_jsmanaged_fields!(ServoRng);
 
@@ -21,7 +21,7 @@ unsafe_no_jsmanaged_fields!(ServoRng);
 #[dom_struct]
 pub struct Crypto {
     reflector_: Reflector,
-    #[ignore_heap_size_of = "Defined in rand"]
+    #[ignore_malloc_size_of = "Defined in rand"]
     rng: DomRefCell<ServoRng>,
 }
 
@@ -34,7 +34,7 @@ impl Crypto {
     }
 
     pub fn new(global: &GlobalScope) -> DomRoot<Crypto> {
-        reflect_dom_object(box Crypto::new_inherited(), global, CryptoBinding::Wrap)
+        reflect_dom_object(Box::new(Crypto::new_inherited()), global, CryptoBinding::Wrap)
     }
 }
 
@@ -44,7 +44,7 @@ impl CryptoMethods for Crypto {
     unsafe fn GetRandomValues(&self,
                        _cx: *mut JSContext,
                        input: *mut JSObject)
-                       -> Fallible<NonZero<*mut JSObject>> {
+                       -> Fallible<NonNull<JSObject>> {
         assert!(!input.is_null());
         typedarray!(in(_cx) let mut array_buffer_view: ArrayBufferView = input);
         let (array_type, mut data) = match array_buffer_view.as_mut() {
@@ -65,7 +65,7 @@ impl CryptoMethods for Crypto {
 
         self.rng.borrow_mut().fill_bytes(&mut data);
 
-        Ok(NonZero::new_unchecked(input))
+        Ok(NonNull::new_unchecked(input))
     }
 }
 

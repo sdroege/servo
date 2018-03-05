@@ -11,16 +11,15 @@ use context::{ElementCascadeInputs, QuirksMode, SelectorFlagsMap};
 use context::{SharedStyleContext, StyleContext};
 use data::ElementData;
 use dom::TElement;
-use invalidation::element::restyle_hints::{RESTYLE_CSS_ANIMATIONS, RESTYLE_CSS_TRANSITIONS};
-use invalidation::element::restyle_hints::{RESTYLE_SMIL, RESTYLE_STYLE_ATTRIBUTE};
 use invalidation::element::restyle_hints::RestyleHint;
 use properties::ComputedValues;
+use properties::longhands::display::computed_value::T as Display;
 use rule_tree::{CascadeLevel, StrongRuleNode};
 use selector_parser::{PseudoElement, RestyleDamage};
 use selectors::matching::ElementSelectorFlags;
 use servo_arc::{Arc, ArcBorrow};
 use style_resolver::ResolvedElementStyles;
-use traversal_flags;
+use traversal_flags::TraversalFlags;
 
 /// Represents the result of comparing an element's old and new style.
 #[derive(Debug)]
@@ -30,16 +29,6 @@ pub struct StyleDifference {
 
     /// Whether any styles changed.
     pub change: StyleChange,
-}
-
-impl StyleDifference {
-    /// Creates a new `StyleDifference`.
-    pub fn new(damage: RestyleDamage, change: StyleChange) -> Self {
-        StyleDifference {
-            change: change,
-            damage: damage,
-        }
-    }
 }
 
 /// Represents whether or not the style of an element has changed.
@@ -83,7 +72,7 @@ impl ChildCascadeRequirement {
 
 /// Determines which styles are being cascaded currently.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CascadeVisitedMode {
+enum CascadeVisitedMode {
     /// Cascade the regular, unvisited styles.
     Unvisited,
     /// Cascade the styles used when an element's relevant link is visited.  A
@@ -92,18 +81,115 @@ pub enum CascadeVisitedMode {
     Visited,
 }
 
-impl CascadeVisitedMode {
-    /// Returns whether the cascade should filter to only visited dependent
-    /// properties based on the cascade mode.
-    pub fn visited_dependent_only(&self) -> bool {
-        *self == CascadeVisitedMode::Visited
-    }
-}
-
 trait PrivateMatchMethods: TElement {
+    /// Updates the rule nodes without re-running selector matching, using just
+    /// the rule tree, for a specific visited mode.
+    ///
+    /// Returns true if an !important rule was replaced.
+    fn replace_rules_internal(
+        &self,
+        replacements: RestyleHint,
+        context: &mut StyleContext<Self>,
+        cascade_visited: CascadeVisitedMode,
+        cascade_inputs: &mut ElementCascadeInputs,
+    ) -> bool {
+        use properties::PropertyDeclarationBlock;
+        use shared_lock::Locked;
+
+        debug_assert!(replacements.intersects(RestyleHint::replacements()) &&
+                      (replacements & !RestyleHint::replacements()).is_empty());
+
+        let stylist = &context.shared.stylist;
+        let guards = &context.shared.guards;
+
+        let primary_rules =
+            match cascade_visited {
+                CascadeVisitedMode::Unvisited => cascade_inputs.primary.rules.as_mut(),
+                CascadeVisitedMode::Visited => cascade_inputs.primary.visited_rules.as_mut(),
+            };
+
+        let primary_rules = match primary_rules {
+            Some(r) => r,
+            None => return false,
+        };
+
+        let replace_rule_node = |level: CascadeLevel,
+                                 pdb: Option<ArcBorrow<Locked<PropertyDeclarationBlock>>>,
+                                 path: &mut StrongRuleNode| -> bool {
+            let mut important_rules_changed = false;
+            let new_node =
+                stylist.rule_tree().update_rule_at_level(
+                    level,
+                    pdb,
+                    path,
+                    guards,
+                    &mut important_rules_changed,
+                );
+            if let Some(n) = new_node {
+                *path = n;
+            }
+            important_rules_changed
+        };
+
+        if !context.shared.traversal_flags.for_animation_only() {
+            let mut result = false;
+            if replacements.contains(RestyleHint::RESTYLE_STYLE_ATTRIBUTE) {
+                let style_attribute = self.style_attribute();
+                result |= replace_rule_node(
+                    CascadeLevel::StyleAttributeNormal,
+                    style_attribute,
+                    primary_rules,
+                );
+                result |= replace_rule_node(
+                    CascadeLevel::StyleAttributeImportant,
+                    style_attribute,
+                    primary_rules,
+                );
+                // FIXME(emilio): Still a hack!
+                self.unset_dirty_style_attribute();
+            }
+            return result;
+        }
+
+        // Animation restyle hints are processed prior to other restyle
+        // hints in the animation-only traversal.
+        //
+        // Non-animation restyle hints will be processed in a subsequent
+        // normal traversal.
+        if replacements.intersects(RestyleHint::for_animations()) {
+            debug_assert!(context.shared.traversal_flags.for_animation_only());
+
+            if replacements.contains(RestyleHint::RESTYLE_SMIL) {
+                replace_rule_node(
+                    CascadeLevel::SMILOverride,
+                    self.smil_override(),
+                    primary_rules,
+                );
+            }
+
+            if replacements.contains(RestyleHint::RESTYLE_CSS_TRANSITIONS) {
+                replace_rule_node(
+                    CascadeLevel::Transitions,
+                    self.transition_rule().as_ref().map(|a| a.borrow_arc()),
+                    primary_rules,
+                );
+            }
+
+            if replacements.contains(RestyleHint::RESTYLE_CSS_ANIMATIONS) {
+                replace_rule_node(
+                    CascadeLevel::Animations,
+                    self.animation_rule().as_ref().map(|a| a.borrow_arc()),
+                    primary_rules,
+                );
+            }
+        }
+
+        false
+    }
+
     /// If there is no transition rule in the ComputedValues, it returns None.
     #[cfg(feature = "gecko")]
-    fn get_after_change_style(
+    fn after_change_style(
         &self,
         context: &mut StyleContext<Self>,
         primary_style: &Arc<ComputedValues>
@@ -141,36 +227,54 @@ trait PrivateMatchMethods: TElement {
     fn needs_animations_update(
         &self,
         context: &mut StyleContext<Self>,
-        old_values: Option<&Arc<ComputedValues>>,
+        old_values: Option<&ComputedValues>,
         new_values: &ComputedValues,
     ) -> bool {
-        use properties::longhands::display::computed_value as display;
-
         let new_box_style = new_values.get_box();
         let has_new_animation_style = new_box_style.specifies_animations();
-        let has_animations = self.has_css_animations();
 
-        old_values.map_or(has_new_animation_style, |old| {
-            let old_box_style = old.get_box();
-            let old_display_style = old_box_style.clone_display();
-            let new_display_style = new_box_style.clone_display();
+        let old = match old_values {
+            Some(old) => old,
+            None => return has_new_animation_style,
+        };
 
-            // If the traverse is triggered by CSS rule changes, we need to
-            // try to update all CSS animations on the element if the element
-            // has or will have CSS animation style regardless of whether the
-            // animation is running or not.
-            // TODO: We should check which @keyframes changed/added/deleted
-            // and update only animations corresponding to those @keyframes.
-            (context.shared.traversal_flags.contains(traversal_flags::ForCSSRuleChanges) &&
-             (has_new_animation_style || has_animations)) ||
-            !old_box_style.animations_equals(new_box_style) ||
-             (old_display_style == display::T::none &&
-              new_display_style != display::T::none &&
-              has_new_animation_style) ||
-             (old_display_style != display::T::none &&
-              new_display_style == display::T::none &&
-              has_animations)
-        })
+        let old_box_style = old.get_box();
+
+        let keyframes_could_have_changed =
+            context.shared.traversal_flags.contains(TraversalFlags::ForCSSRuleChanges);
+
+        // If the traversal is triggered due to changes in CSS rules changes, we
+        // need to try to update all CSS animations on the element if the
+        // element has or will have CSS animation style regardless of whether
+        // the animation is running or not.
+        //
+        // TODO: We should check which @keyframes were added/changed/deleted and
+        // update only animations corresponding to those @keyframes.
+        if keyframes_could_have_changed &&
+            (has_new_animation_style || self.has_css_animations())
+        {
+            return true;
+        }
+
+        // If the animations changed, well...
+        if !old_box_style.animations_equals(new_box_style) {
+            return true;
+        }
+
+        let old_display = old_box_style.clone_display();
+        let new_display = new_box_style.clone_display();
+
+        // If we were display: none, we may need to trigger animations.
+        if old_display == Display::None && new_display != Display::None {
+            return has_new_animation_style;
+        }
+
+        // If we are becoming display: none, we may need to stop animations.
+        if old_display != Display::None && new_display == Display::None {
+            return self.has_css_animations();
+        }
+
+        false
     }
 
     /// Create a SequentialTask for resolving descendants in a SMIL display property
@@ -183,21 +287,13 @@ trait PrivateMatchMethods: TElement {
         new_values: &ComputedValues,
         restyle_hints: RestyleHint
     ) {
-        use context::DISPLAY_CHANGED_FROM_NONE_FOR_SMIL;
-        use properties::longhands::display::computed_value as display;
+        use context::PostAnimationTasks;
 
-        if !restyle_hints.intersects(RESTYLE_SMIL) {
+        if !restyle_hints.intersects(RestyleHint::RESTYLE_SMIL) {
             return;
         }
 
-        let display_changed_from_none = old_values.map_or(false, |old| {
-            let old_display_style = old.get_box().clone_display();
-            let new_display_style = new_values.get_box().clone_display();
-            old_display_style == display::T::none &&
-            new_display_style != display::T::none
-        });
-
-        if display_changed_from_none {
+        if new_values.is_display_property_changed_from_none(old_values) {
             // When display value is changed from none to other, we need to
             // traverse descendant elements in a subsequent normal
             // traversal (we can't traverse them in this animation-only restyle
@@ -206,20 +302,21 @@ trait PrivateMatchMethods: TElement {
             // restyle).
             let task = ::context::SequentialTask::process_post_animation(
                 *self,
-                DISPLAY_CHANGED_FROM_NONE_FOR_SMIL,
+                PostAnimationTasks::DISPLAY_CHANGED_FROM_NONE_FOR_SMIL,
             );
             context.thread_local.tasks.push(task);
         }
     }
 
     #[cfg(feature = "gecko")]
-    fn process_animations(&self,
-                          context: &mut StyleContext<Self>,
-                          old_values: &mut Option<Arc<ComputedValues>>,
-                          new_values: &mut Arc<ComputedValues>,
-                          restyle_hint: RestyleHint,
-                          important_rules_changed: bool) {
-        use context::{CASCADE_RESULTS, CSS_ANIMATIONS, CSS_TRANSITIONS, EFFECT_PROPERTIES};
+    fn process_animations(
+        &self,
+        context: &mut StyleContext<Self>,
+        old_values: &mut Option<Arc<ComputedValues>>,
+        new_values: &mut Arc<ComputedValues>,
+        restyle_hint: RestyleHint,
+        important_rules_changed: bool,
+    ) {
         use context::UpdateAnimationsTasks;
 
         if context.shared.traversal_flags.for_animation_only() {
@@ -236,14 +333,14 @@ trait PrivateMatchMethods: TElement {
         // in addition to the unvisited styles.
 
         let mut tasks = UpdateAnimationsTasks::empty();
-        if self.needs_animations_update(context, old_values.as_ref(), new_values) {
-            tasks.insert(CSS_ANIMATIONS);
+        if self.needs_animations_update(context, old_values.as_ref().map(|s| &**s), new_values) {
+            tasks.insert(UpdateAnimationsTasks::CSS_ANIMATIONS);
         }
 
         let before_change_style = if self.might_need_transitions_update(old_values.as_ref().map(|s| &**s),
                                                                         new_values) {
             let after_change_style = if self.has_css_transitions() {
-                self.get_after_change_style(context, new_values)
+                self.after_change_style(context, new_values)
             } else {
                 None
             };
@@ -257,17 +354,20 @@ trait PrivateMatchMethods: TElement {
                 let after_change_style_ref =
                     after_change_style.as_ref().unwrap_or(&new_values);
 
-                self.needs_transitions_update(old_values.as_ref().unwrap(),
-                                              after_change_style_ref)
+                self.needs_transitions_update(
+                    old_values.as_ref().unwrap(),
+                    after_change_style_ref,
+                )
             };
 
             if needs_transitions_update {
                 if let Some(values_without_transitions) = after_change_style {
                     *new_values = values_without_transitions;
                 }
-                tasks.insert(CSS_TRANSITIONS);
+                tasks.insert(UpdateAnimationsTasks::CSS_TRANSITIONS);
 
-                // We need to clone old_values into SequentialTask, so we can use it later.
+                // We need to clone old_values into SequentialTask, so we can
+                // use it later.
                 old_values.clone()
             } else {
                 None
@@ -277,9 +377,12 @@ trait PrivateMatchMethods: TElement {
         };
 
         if self.has_animations() {
-            tasks.insert(EFFECT_PROPERTIES);
+            tasks.insert(UpdateAnimationsTasks::EFFECT_PROPERTIES);
             if important_rules_changed {
-                tasks.insert(CASCADE_RESULTS);
+                tasks.insert(UpdateAnimationsTasks::CASCADE_RESULTS);
+            }
+            if new_values.is_display_property_changed_from_none(old_values.as_ref().map(|s| &**s)) {
+                tasks.insert(UpdateAnimationsTasks::DISPLAY_CHANGED_FROM_NONE);
             }
         }
 
@@ -292,31 +395,38 @@ trait PrivateMatchMethods: TElement {
     }
 
     #[cfg(feature = "servo")]
-    fn process_animations(&self,
-                          context: &mut StyleContext<Self>,
-                          old_values: &mut Option<Arc<ComputedValues>>,
-                          new_values: &mut Arc<ComputedValues>,
-                          _restyle_hint: RestyleHint,
-                          _important_rules_changed: bool) {
+    fn process_animations(
+        &self,
+        context: &mut StyleContext<Self>,
+        old_values: &mut Option<Arc<ComputedValues>>,
+        new_values: &mut Arc<ComputedValues>,
+        _restyle_hint: RestyleHint,
+        _important_rules_changed: bool,
+    ) {
         use animation;
         use dom::TNode;
 
-        let possibly_expired_animations =
-            &mut context.thread_local.current_element_info.as_mut().unwrap()
-                        .possibly_expired_animations;
+        let mut possibly_expired_animations = vec![];
         let shared_context = context.shared;
         if let Some(ref mut old) = *old_values {
-            self.update_animations_for_cascade(shared_context, old,
-                                               possibly_expired_animations,
-                                               &context.thread_local.font_metrics_provider);
+            // FIXME(emilio, #20116): This makes no sense.
+            self.update_animations_for_cascade(
+                shared_context,
+                old,
+                &mut possibly_expired_animations,
+                &context.thread_local.font_metrics_provider,
+            );
         }
 
         let new_animations_sender = &context.thread_local.new_animations_sender;
         let this_opaque = self.as_node().opaque();
         // Trigger any present animations if necessary.
-        animation::maybe_start_animations(&shared_context,
-                                          new_animations_sender,
-                                          this_opaque, &new_values);
+        animation::maybe_start_animations(
+            &shared_context,
+            new_animations_sender,
+            this_opaque,
+            &new_values,
+        );
 
         // Trigger transitions if necessary. This will reset `new_values` back
         // to its old value if it did trigger a transition.
@@ -324,10 +434,11 @@ trait PrivateMatchMethods: TElement {
             animation::start_transitions_if_applicable(
                 new_animations_sender,
                 this_opaque,
-                &**values,
+                &values,
                 new_values,
                 &shared_context.timer,
-                &possibly_expired_animations);
+                &possibly_expired_animations,
+            );
         }
     }
 
@@ -336,107 +447,128 @@ trait PrivateMatchMethods: TElement {
     fn accumulate_damage_for(
         &self,
         shared_context: &SharedStyleContext,
-        skip_applying_damage: bool,
         damage: &mut RestyleDamage,
         old_values: &ComputedValues,
         new_values: &ComputedValues,
         pseudo: Option<&PseudoElement>,
     ) -> ChildCascadeRequirement {
         debug!("accumulate_damage_for: {:?}", self);
-
-        // Don't accumulate damage if we're in a forgetful traversal.
-        if shared_context.traversal_flags.contains(traversal_flags::Forgetful) {
-            debug!(" > forgetful traversal");
-            return ChildCascadeRequirement::MustCascadeChildren;
-        }
+        debug_assert!(!shared_context.traversal_flags.contains(TraversalFlags::Forgetful));
 
         let difference =
             self.compute_style_difference(old_values, new_values, pseudo);
 
-        if !skip_applying_damage {
-            *damage |= difference.damage;
-        }
+        *damage |= difference.damage;
 
         debug!(" > style difference: {:?}", difference);
 
         // We need to cascade the children in order to ensure the correct
-        // propagation of computed value flags.
-        if old_values.flags != new_values.flags {
+        // propagation of inherited computed value flags.
+        if old_values.flags.maybe_inherited() != new_values.flags.maybe_inherited() {
             debug!(" > flags changed: {:?} != {:?}", old_values.flags, new_values.flags);
             return ChildCascadeRequirement::MustCascadeChildren;
         }
 
         match difference.change {
-            StyleChange::Unchanged => ChildCascadeRequirement::CanSkipCascade,
+            StyleChange::Unchanged => {
+                return ChildCascadeRequirement::CanSkipCascade
+            },
             StyleChange::Changed { reset_only } => {
                 // If inherited properties changed, the best we can do is
                 // cascade the children.
                 if !reset_only {
                     return ChildCascadeRequirement::MustCascadeChildren
                 }
-
-                let old_display = old_values.get_box().clone_display();
-                let new_display = new_values.get_box().clone_display();
-
-                // Blockification of children may depend on our display value,
-                // so we need to actually do the recascade. We could potentially
-                // do better, but it doesn't seem worth it.
-                if old_display.is_item_container() != new_display.is_item_container() {
-                    return ChildCascadeRequirement::MustCascadeChildren
-                }
-
-                // Line break suppression may also be affected if the display
-                // type changes from ruby to non-ruby.
-                #[cfg(feature = "gecko")]
-                {
-                    if old_display.is_ruby_type() != new_display.is_ruby_type() {
-                        return ChildCascadeRequirement::MustCascadeChildren
-                    }
-                }
-
-                // Children with justify-items: auto may depend on our
-                // justify-items property value.
-                //
-                // Similarly, we could potentially do better, but this really
-                // seems not common enough to care about.
-                #[cfg(feature = "gecko")]
-                {
-                    use values::specified::align;
-
-                    let old_justify_items =
-                        old_values.get_position().clone_justify_items();
-                    let new_justify_items =
-                        new_values.get_position().clone_justify_items();
-
-                    let was_legacy_justify_items =
-                        old_justify_items.computed.0.contains(align::ALIGN_LEGACY);
-
-                    let is_legacy_justify_items =
-                        new_justify_items.computed.0.contains(align::ALIGN_LEGACY);
-
-                    if is_legacy_justify_items != was_legacy_justify_items {
-                        return ChildCascadeRequirement::MustCascadeChildren;
-                    }
-
-                    if was_legacy_justify_items &&
-                        old_justify_items.computed != new_justify_items.computed {
-                        return ChildCascadeRequirement::MustCascadeChildren;
-                    }
-                }
-
-                // We could prove that, if our children don't inherit reset
-                // properties, we can stop the cascade.
-                ChildCascadeRequirement::MustCascadeChildrenIfInheritResetStyle
             }
         }
+
+        let old_display = old_values.get_box().clone_display();
+        let new_display = new_values.get_box().clone_display();
+
+        // If we used to be a display: none element, and no longer are,
+        // our children need to be restyled because they're unstyled.
+        //
+        // NOTE(emilio): Gecko has the special-case of -moz-binding, but
+        // that gets handled on the frame constructor when processing
+        // the reframe, so no need to handle that here.
+        if old_display == Display::None && old_display != new_display {
+            return ChildCascadeRequirement::MustCascadeChildren
+        }
+
+        // Blockification of children may depend on our display value,
+        // so we need to actually do the recascade. We could potentially
+        // do better, but it doesn't seem worth it.
+        if old_display.is_item_container() != new_display.is_item_container() {
+            return ChildCascadeRequirement::MustCascadeChildren
+        }
+
+        // Line break suppression may also be affected if the display
+        // type changes from ruby to non-ruby.
+        #[cfg(feature = "gecko")]
+        {
+            if old_display.is_ruby_type() != new_display.is_ruby_type() {
+                return ChildCascadeRequirement::MustCascadeChildren
+            }
+        }
+
+        // Children with justify-items: auto may depend on our
+        // justify-items property value.
+        //
+        // Similarly, we could potentially do better, but this really
+        // seems not common enough to care about.
+        #[cfg(feature = "gecko")]
+        {
+            use values::specified::align::AlignFlags;
+
+            let old_justify_items =
+                old_values.get_position().clone_justify_items();
+            let new_justify_items =
+                new_values.get_position().clone_justify_items();
+
+            let was_legacy_justify_items =
+                old_justify_items.computed.0.contains(AlignFlags::LEGACY);
+
+            let is_legacy_justify_items =
+                new_justify_items.computed.0.contains(AlignFlags::LEGACY);
+
+            if is_legacy_justify_items != was_legacy_justify_items {
+                return ChildCascadeRequirement::MustCascadeChildren;
+            }
+
+            if was_legacy_justify_items &&
+                old_justify_items.computed != new_justify_items.computed {
+                return ChildCascadeRequirement::MustCascadeChildren;
+            }
+        }
+
+        #[cfg(feature = "servo")]
+        {
+            // We may need to set or propagate the CAN_BE_FRAGMENTED bit
+            // on our children.
+            if old_values.is_multicol() != new_values.is_multicol() {
+                return ChildCascadeRequirement::MustCascadeChildren;
+            }
+        }
+
+        // We could prove that, if our children don't inherit reset
+        // properties, we can stop the cascade.
+        ChildCascadeRequirement::MustCascadeChildrenIfInheritResetStyle
     }
 
+    // FIXME(emilio, #20116): It's not clear to me that the name of this method
+    // represents anything of what it does.
+    //
+    // Also, this function gets the old style, for some reason I don't really
+    // get, but the functions called (mainly update_style_for_animation) expects
+    // the new style, wtf?
     #[cfg(feature = "servo")]
-    fn update_animations_for_cascade(&self,
-                                     context: &SharedStyleContext,
-                                     style: &mut Arc<ComputedValues>,
-                                     possibly_expired_animations: &mut Vec<::animation::PropertyAnimation>,
-                                     font_metrics: &::font_metrics::FontMetricsProvider) {
+    fn update_animations_for_cascade(
+        &self,
+        context: &SharedStyleContext,
+        style: &mut Arc<ComputedValues>,
+        possibly_expired_animations: &mut Vec<::animation::PropertyAnimation>,
+        font_metrics: &::font_metrics::FontMetricsProvider,
+    ) {
         use animation::{self, Animation};
         use dom::TNode;
 
@@ -444,34 +576,38 @@ trait PrivateMatchMethods: TElement {
         let this_opaque = self.as_node().opaque();
         animation::complete_expired_transitions(this_opaque, style, context);
 
-        // Merge any running transitions into the current style, and cancel them.
-        let had_running_animations = context.running_animations
-                                            .read()
-                                            .get(&this_opaque)
-                                            .is_some();
-        if had_running_animations {
-            let mut all_running_animations = context.running_animations.write();
-            for running_animation in all_running_animations.get_mut(&this_opaque).unwrap() {
-                // This shouldn't happen frequently, but under some
-                // circumstances mainly huge load or debug builds, the
-                // constellation might be delayed in sending the
-                // `TickAllAnimations` message to layout.
-                //
-                // Thus, we can't assume all the animations have been already
-                // updated by layout, because other restyle due to script might
-                // be triggered by layout before the animation tick.
-                //
-                // See #12171 and the associated PR for an example where this
-                // happened while debugging other release panic.
-                if !running_animation.is_expired() {
-                    animation::update_style_for_animation(context,
-                                                          running_animation,
-                                                          style,
-                                                          font_metrics);
-                    if let Animation::Transition(_, _, ref frame, _) = *running_animation {
-                        possibly_expired_animations.push(frame.property_animation.clone())
-                    }
-                }
+        // Merge any running animations into the current style, and cancel them.
+        let had_running_animations =
+            context.running_animations.read().get(&this_opaque).is_some();
+        if !had_running_animations {
+            return;
+        }
+
+        let mut all_running_animations = context.running_animations.write();
+        for running_animation in all_running_animations.get_mut(&this_opaque).unwrap() {
+            // This shouldn't happen frequently, but under some circumstances
+            // mainly huge load or debug builds, the constellation might be
+            // delayed in sending the `TickAllAnimations` message to layout.
+            //
+            // Thus, we can't assume all the animations have been already
+            // updated by layout, because other restyle due to script might be
+            // triggered by layout before the animation tick.
+            //
+            // See #12171 and the associated PR for an example where this
+            // happened while debugging other release panic.
+            if running_animation.is_expired() {
+                continue;
+            }
+
+            animation::update_style_for_animation::<Self>(
+                context,
+                running_animation,
+                style,
+                font_metrics,
+            );
+
+            if let Animation::Transition(_, _, ref frame, _) = *running_animation {
+                possibly_expired_animations.push(frame.property_animation.clone())
             }
         }
     }
@@ -490,7 +626,7 @@ pub trait MatchMethods : TElement {
     /// Returns itself if the element has no parent. In practice this doesn't
     /// happen because the root element is blockified per spec, but it could
     /// happen if we decide to not blockify for roots of disconnected subtrees,
-    /// which is a kind of dubious beahavior.
+    /// which is a kind of dubious behavior.
     fn layout_parent(&self) -> Self {
         let mut current = self.clone();
         loop {
@@ -517,7 +653,6 @@ pub trait MatchMethods : TElement {
         mut new_styles: ResolvedElementStyles,
         important_rules_changed: bool,
     ) -> ChildCascadeRequirement {
-        use dom::TNode;
         use std::cmp;
 
         self.process_animations(
@@ -530,24 +665,6 @@ pub trait MatchMethods : TElement {
 
         // First of all, update the styles.
         let old_styles = data.set_styles(new_styles);
-
-        // Propagate the "can be fragmented" bit. It would be nice to
-        // encapsulate this better.
-        if cfg!(feature = "servo") {
-            let layout_parent =
-                self.inheritance_parent().map(|e| e.layout_parent());
-            let layout_parent_data =
-                layout_parent.as_ref().and_then(|e| e.borrow_data());
-            let layout_parent_style =
-                layout_parent_data.as_ref().map(|d| d.styles.primary());
-
-            if let Some(ref p) = layout_parent_style {
-                let can_be_fragmented =
-                    p.is_multicol() ||
-                    layout_parent.as_ref().unwrap().as_node().can_be_fragmented();
-                unsafe { self.as_node().set_can_be_fragmented(can_be_fragmented); }
-            }
-        }
 
         let new_primary_style = data.styles.primary.as_ref().unwrap();
 
@@ -584,7 +701,7 @@ pub trait MatchMethods : TElement {
         }
 
         // Don't accumulate damage if we're in a forgetful traversal.
-        if context.shared.traversal_flags.contains(traversal_flags::Forgetful) {
+        if context.shared.traversal_flags.contains(TraversalFlags::Forgetful) {
             return ChildCascadeRequirement::MustCascadeChildren;
         }
 
@@ -598,7 +715,6 @@ pub trait MatchMethods : TElement {
             cascade_requirement,
             self.accumulate_damage_for(
                 context.shared,
-                data.skip_applying_damage(),
                 &mut data.damage,
                 &old_primary_style,
                 new_primary_style,
@@ -620,7 +736,6 @@ pub trait MatchMethods : TElement {
                 (&Some(ref old), &Some(ref new)) => {
                     self.accumulate_damage_for(
                         context.shared,
-                        data.skip_applying_damage(),
                         &mut data.damage,
                         old,
                         new,
@@ -635,11 +750,9 @@ pub trait MatchMethods : TElement {
                     // case.
                     let pseudo = PseudoElement::from_eager_index(i);
                     let new_pseudo_should_exist =
-                        new.as_ref().map_or(false,
-                                            |s| pseudo.should_exist(s));
+                        new.as_ref().map_or(false, |s| pseudo.should_exist(s));
                     let old_pseudo_should_exist =
-                        old.as_ref().map_or(false,
-                                            |s| pseudo.should_exist(s));
+                        old.as_ref().map_or(false, |s| pseudo.should_exist(s));
                     if new_pseudo_should_exist != old_pseudo_should_exist {
                         data.damage |= RestyleDamage::reconstruct();
                         return cascade_requirement;
@@ -657,10 +770,12 @@ pub trait MatchMethods : TElement {
     ///
     /// TODO(emilio): This is somewhat inefficient, because it doesn't take
     /// advantage of us knowing that the traversal is sequential.
-    fn apply_selector_flags(&self,
-                            map: &mut SelectorFlagsMap<Self>,
-                            element: &Self,
-                            flags: ElementSelectorFlags) {
+    fn apply_selector_flags(
+        &self,
+        map: &mut SelectorFlagsMap<Self>,
+        element: &Self,
+        flags: ElementSelectorFlags,
+    ) {
         // Handle flags that apply to the element.
         let self_flags = flags.for_self();
         if !self_flags.is_empty() {
@@ -717,107 +832,6 @@ pub trait MatchMethods : TElement {
             cascade_inputs
         );
         result
-    }
-
-    /// Updates the rule nodes without re-running selector matching, using just
-    /// the rule tree, for a specific visited mode.
-    ///
-    /// Returns true if an !important rule was replaced.
-    fn replace_rules_internal(
-        &self,
-        replacements: RestyleHint,
-        context: &mut StyleContext<Self>,
-        cascade_visited: CascadeVisitedMode,
-        cascade_inputs: &mut ElementCascadeInputs,
-    ) -> bool {
-        use properties::PropertyDeclarationBlock;
-        use shared_lock::Locked;
-
-        debug_assert!(replacements.intersects(RestyleHint::replacements()) &&
-                      (replacements & !RestyleHint::replacements()).is_empty());
-
-        let stylist = &context.shared.stylist;
-        let guards = &context.shared.guards;
-
-        let primary_rules =
-            match cascade_visited {
-                CascadeVisitedMode::Unvisited => cascade_inputs.primary.rules.as_mut(),
-                CascadeVisitedMode::Visited => cascade_inputs.primary.visited_rules.as_mut(),
-            };
-
-        let primary_rules = match primary_rules {
-            Some(r) => r,
-            None => return false,
-        };
-
-        let replace_rule_node = |level: CascadeLevel,
-                                 pdb: Option<ArcBorrow<Locked<PropertyDeclarationBlock>>>,
-                                 path: &mut StrongRuleNode| -> bool {
-            let mut important_rules_changed = false;
-            let new_node = stylist.rule_tree()
-                                  .update_rule_at_level(level,
-                                                        pdb,
-                                                        path,
-                                                        guards,
-                                                        &mut important_rules_changed);
-            if let Some(n) = new_node {
-                *path = n;
-            }
-            important_rules_changed
-        };
-
-        if !context.shared.traversal_flags.for_animation_only() {
-            let mut result = false;
-            if replacements.contains(RESTYLE_STYLE_ATTRIBUTE) {
-                let style_attribute = self.style_attribute();
-                result |= replace_rule_node(CascadeLevel::StyleAttributeNormal,
-                                            style_attribute,
-                                            primary_rules);
-                result |= replace_rule_node(CascadeLevel::StyleAttributeImportant,
-                                            style_attribute,
-                                            primary_rules);
-                // FIXME(emilio): Still a hack!
-                self.unset_dirty_style_attribute();
-            }
-            return result;
-        }
-
-        // Animation restyle hints are processed prior to other restyle
-        // hints in the animation-only traversal.
-        //
-        // Non-animation restyle hints will be processed in a subsequent
-        // normal traversal.
-        if replacements.intersects(RestyleHint::for_animations()) {
-            debug_assert!(context.shared.traversal_flags.for_animation_only());
-
-            if replacements.contains(RESTYLE_SMIL) {
-                replace_rule_node(CascadeLevel::SMILOverride,
-                                  self.get_smil_override(),
-                                  primary_rules);
-            }
-
-            let replace_rule_node_for_animation = |level: CascadeLevel,
-                                                   primary_rules: &mut StrongRuleNode| {
-                let animation_rule = self.get_animation_rule_by_cascade(level);
-                replace_rule_node(level,
-                                  animation_rule.as_ref().map(|a| a.borrow_arc()),
-                                  primary_rules);
-            };
-
-            // Apply Transition rules and Animation rules if the corresponding restyle hint
-            // is contained.
-            if replacements.contains(RESTYLE_CSS_TRANSITIONS) {
-                replace_rule_node_for_animation(CascadeLevel::Transitions,
-                                                primary_rules);
-            }
-
-            if replacements.contains(RESTYLE_CSS_ANIMATIONS) {
-                replace_rule_node_for_animation(CascadeLevel::Animations,
-                                                primary_rules);
-            }
-        }
-
-        false
     }
 
     /// Given the old and new style of this element, and whether it's a

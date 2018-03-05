@@ -15,13 +15,14 @@ extern crate cookie as cookie_rs;
 extern crate devtools_traits;
 extern crate euclid;
 extern crate gfx_traits;
-extern crate heapsize;
-#[macro_use]
-extern crate heapsize_derive;
 extern crate hyper;
 extern crate hyper_serde;
 extern crate ipc_channel;
 extern crate libc;
+#[macro_use]
+extern crate malloc_size_of;
+#[macro_use]
+extern crate malloc_size_of_derive;
 extern crate msg;
 extern crate net_traits;
 extern crate profile_traits;
@@ -40,21 +41,19 @@ pub mod webdriver_msg;
 use bluetooth_traits::BluetoothRequest;
 use canvas_traits::webgl::WebGLPipeline;
 use devtools_traits::{DevtoolScriptControlMsg, ScriptToDevtoolsControlMsg, WorkerId};
-use euclid::{Size2D, Length, Point2D, Vector2D, Rect, ScaleFactor, TypedSize2D};
+use euclid::{Size2D, Length, Point2D, Vector2D, Rect, TypedScale, TypedSize2D};
 use gfx_traits::Epoch;
-use heapsize::HeapSizeOf;
 use hyper::header::Headers;
 use hyper::method::Method;
 use ipc_channel::{Error as IpcError};
 use ipc_channel::ipc::{IpcReceiver, IpcSender};
 use libc::c_void;
-use msg::constellation_msg::{BrowsingContextId, TopLevelBrowsingContextId, FrameType, Key, KeyModifiers, KeyState};
+use msg::constellation_msg::{BrowsingContextId, TopLevelBrowsingContextId, Key, KeyModifiers, KeyState};
 use msg::constellation_msg::{PipelineId, PipelineNamespaceId, TraversalDirection};
 use net_traits::{FetchResponseMsg, ReferrerPolicy, ResourceThreads};
 use net_traits::image::base::Image;
 use net_traits::image::base::PixelFormat;
 use net_traits::image_cache::ImageCache;
-use net_traits::response::HttpsState;
 use net_traits::storage_thread::StorageType;
 use profile_traits::mem;
 use profile_traits::time as profile_time;
@@ -68,8 +67,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, RecvTimeoutError};
 use style_traits::CSSPixel;
 use style_traits::SpeculativePainter;
+use style_traits::cursor::CursorKind;
 use webdriver_msg::{LoadStatus, WebDriverScriptCommand};
-use webrender_api::{ClipId, DevicePixel, ImageKey};
+use webrender_api::{ExternalScrollId, DevicePixel, DocumentId, ImageKey};
 use webvr_traits::{WebVREvent, WebVRMsg};
 
 pub use script_msg::{LayoutMsg, ScriptMsg, EventResult, LogEntry};
@@ -80,11 +80,7 @@ pub use script_msg::{ServiceWorkerMsg, ScopeThings, SWManagerMsg, SWManagerSende
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct UntrustedNodeAddress(pub *const c_void);
 
-impl HeapSizeOf for UntrustedNodeAddress {
-    fn heap_size_of_children(&self) -> usize {
-        0
-    }
-}
+malloc_size_of_is_0!(UntrustedNodeAddress);
 
 #[allow(unsafe_code)]
 unsafe impl Send for UntrustedNodeAddress {}
@@ -125,7 +121,7 @@ pub enum LayoutControlMsg {
     /// and `false` is returned if all fonts have loaded.
     GetWebFontLoadState(IpcSender<bool>),
     /// Send the paint time for a specific epoch to the layout thread.
-    PaintMetric(Epoch, f64),
+    PaintMetric(Epoch, u64),
 }
 
 /// can be passed to `LoadUrl` to load a page with GET/POST
@@ -158,7 +154,7 @@ pub struct LoadData {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum JsEvalResult {
     /// The js evaluation had a non-string result, 204 status code.
-    /// https://html.spec.whatwg.org/multipage/#navigate 12.11
+    /// <https://html.spec.whatwg.org/multipage/#navigate> 12.11
     NoContent,
     /// The js evaluation had a string result.
     Ok(Vec<u8>)
@@ -189,7 +185,7 @@ impl LoadData {
 pub struct NewLayoutInfo {
     /// The ID of the parent pipeline and frame type, if any.
     /// If `None`, this is a root pipeline.
-    pub parent_info: Option<(PipelineId, FrameType)>,
+    pub parent_info: Option<PipelineId>,
     /// Id of the newly-created pipeline.
     pub new_pipeline_id: PipelineId,
     /// Id of the browsing context associated with this pipeline.
@@ -221,9 +217,10 @@ pub enum DiscardBrowsingContext {
 /// A document is active if it is the current active document in its session history,
 /// it is fuly active if it is active and all of its ancestors are active,
 /// and it is inactive otherwise.
-/// https://html.spec.whatwg.org/multipage/#active-document
-/// https://html.spec.whatwg.org/multipage/#fully-active
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, HeapSizeOf, PartialEq, Serialize)]
+///
+/// * <https://html.spec.whatwg.org/multipage/#active-document>
+/// * <https://html.spec.whatwg.org/multipage/#fully-active>
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize)]
 pub enum DocumentActivity {
     /// An inactive document
     Inactive,
@@ -233,17 +230,19 @@ pub enum DocumentActivity {
     FullyActive,
 }
 
-/// The type of recorded paint metric.
-#[derive(Deserialize, Serialize)]
-pub enum PaintMetricType {
-    /// Time to First Paint type.
+/// Type of recorded progressive web metric
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub enum ProgressiveWebMetricType {
+    /// Time to first Paint
     FirstPaint,
-    /// Time to First Contentful Paint type.
+    /// Time to first contentful paint
     FirstContentfulPaint,
+    /// Time to interactive
+    TimeToInteractive,
 }
 
 /// The reason why the pipeline id of an iframe is being updated.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, HeapSizeOf, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize)]
 pub enum UpdatePipelineIdReason {
     /// The pipeline id is being updated due to a navigation.
     Navigation,
@@ -287,9 +286,6 @@ pub enum ConstellationControlMsg {
     Navigate(PipelineId, BrowsingContextId, LoadData, bool),
     /// Post a message to a given window.
     PostMessage(PipelineId, Option<ImmutableOrigin>, Vec<u8>),
-    /// Requests the script thread forward a mozbrowser event to a mozbrowser iframe it owns,
-    /// or to the window if no browsing context id is provided.
-    MozBrowserEvent(PipelineId, Option<TopLevelBrowsingContextId>, MozBrowserEvent),
     /// Updates the current pipeline ID of a given iframe.
     /// First PipelineId is for the parent, second is the new PipelineId for the frame.
     UpdatePipelineId(PipelineId, BrowsingContextId, PipelineId, UpdatePipelineIdReason),
@@ -324,7 +320,7 @@ pub enum ConstellationControlMsg {
     /// Notifies the script thread of WebVR events.
     WebVREvents(PipelineId, Vec<WebVREvent>),
     /// Notifies the script thread about a new recorded paint metric.
-    PaintMetric(PipelineId, PaintMetricType, f64),
+    PaintMetric(PipelineId, ProgressiveWebMetricType, u64),
 }
 
 impl fmt::Debug for ConstellationControlMsg {
@@ -346,7 +342,6 @@ impl fmt::Debug for ConstellationControlMsg {
             NotifyVisibilityChange(..) => "NotifyVisibilityChange",
             Navigate(..) => "Navigate",
             PostMessage(..) => "PostMessage",
-            MozBrowserEvent(..) => "MozBrowserEvent",
             UpdatePipelineId(..) => "UpdatePipelineId",
             FocusIFrame(..) => "FocusIFrame",
             WebDriverScriptCommand(..) => "WebDriverScriptCommand",
@@ -402,7 +397,7 @@ pub enum TouchEventType {
 
 /// An opaque identifier for a touch point.
 ///
-/// http://w3c.github.io/touch-events/#widl-Touch-identifier
+/// <http://w3c.github.io/touch-events/#widl-Touch-identifier>
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TouchId(pub i32);
 
@@ -418,7 +413,7 @@ pub enum MouseButton {
 }
 
 /// The types of mouse events
-#[derive(Deserialize, HeapSizeOf, Serialize)]
+#[derive(Deserialize, MallocSizeOf, Serialize)]
 pub enum MouseEventType {
     /// Mouse button clicked
     Click,
@@ -434,26 +429,19 @@ pub enum CompositorEvent {
     /// The window was resized.
     ResizeEvent(WindowSizeData, WindowSizeType),
     /// A mouse button state changed.
-    MouseButtonEvent(MouseEventType, MouseButton, Point2D<f32>),
+    MouseButtonEvent(
+        MouseEventType,
+        MouseButton,
+        Point2D<f32>,
+        Option<UntrustedNodeAddress>,
+        Option<Point2D<f32>>
+    ),
     /// The mouse was moved over a point (or was moved out of the recognizable region).
-    MouseMoveEvent(Option<Point2D<f32>>),
+    MouseMoveEvent(Option<Point2D<f32>>, Option<UntrustedNodeAddress>),
     /// A touch event was generated with a touch ID and location.
-    TouchEvent(TouchEventType, TouchId, Point2D<f32>),
-    /// Touchpad pressure event
-    TouchpadPressureEvent(Point2D<f32>, f32, TouchpadPressurePhase),
+    TouchEvent(TouchEventType, TouchId, Point2D<f32>, Option<UntrustedNodeAddress>),
     /// A key was pressed.
     KeyEvent(Option<char>, Key, KeyState, KeyModifiers),
-}
-
-/// Touchpad pressure phase for `TouchpadPressureEvent`.
-#[derive(Clone, Copy, Deserialize, HeapSizeOf, PartialEq, Serialize)]
-pub enum TouchpadPressurePhase {
-    /// Pressure before a regular click.
-    BeforeClick,
-    /// Pressure after a regular click.
-    AfterFirstClick,
-    /// Pressure after a "forceTouch" click
-    AfterSecondClick,
 }
 
 /// Requests a TimerEvent-Message be sent after the given duration.
@@ -476,7 +464,7 @@ pub enum TimerSchedulerMsg {
 pub struct TimerEvent(pub TimerSource, pub TimerEventId);
 
 /// Describes the thread that requested the TimerEvent.
-#[derive(Clone, Copy, Debug, Deserialize, HeapSizeOf, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub enum TimerSource {
     /// The event was requested from a window (ScriptThread).
     FromWindow(PipelineId),
@@ -485,14 +473,14 @@ pub enum TimerSource {
 }
 
 /// The id to be used for a `TimerEvent` is defined by the corresponding `TimerEventRequest`.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, HeapSizeOf, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
 pub struct TimerEventId(pub u32);
 
 /// Unit of measurement.
-#[derive(Clone, Copy, HeapSizeOf)]
+#[derive(Clone, Copy, MallocSizeOf)]
 pub enum Milliseconds {}
 /// Unit of measurement.
-#[derive(Clone, Copy, HeapSizeOf)]
+#[derive(Clone, Copy, MallocSizeOf)]
 pub enum Nanoseconds {}
 
 /// Amount of milliseconds.
@@ -518,7 +506,7 @@ pub struct InitialScriptState {
     pub id: PipelineId,
     /// The subpage ID of this pipeline to create in its pipeline parent.
     /// If `None`, this is the root.
-    pub parent_info: Option<(PipelineId, FrameType)>,
+    pub parent_info: Option<PipelineId>,
     /// The ID of the browsing context this script is part of.
     pub browsing_context_id: BrowsingContextId,
     /// The ID of the top-level browsing context this script is part of.
@@ -554,7 +542,11 @@ pub struct InitialScriptState {
     /// A channel to the webgl thread used in this pipeline.
     pub webgl_chan: WebGLPipeline,
     /// A channel to the webvr thread, if available.
-    pub webvr_chan: Option<IpcSender<WebVRMsg>>
+    pub webvr_chan: Option<IpcSender<WebVRMsg>>,
+    /// The Webrender document ID associated with this thread.
+    pub webrender_document: DocumentId,
+    /// TODO
+    pub webrender_api_sender: webrender_api::RenderApiSender,
 }
 
 /// This trait allows creating a `ScriptThread` without depending on the `script`
@@ -584,14 +576,11 @@ pub struct IFrameLoadInfo {
     /// The ID for this iframe's nested browsing context.
     pub browsing_context_id: BrowsingContextId,
     /// The ID for the top-level ancestor browsing context of this iframe's nested browsing context.
-    /// Note: this is the same as the browsing_context_id for mozbrowser iframes.
     pub top_level_browsing_context_id: TopLevelBrowsingContextId,
     /// The new pipeline ID that the iframe has generated.
     pub new_pipeline_id: PipelineId,
     ///  Whether this iframe should be considered private
     pub is_private: bool,
-    /// Whether this iframe is a mozbrowser iframe
-    pub frame_type: FrameType,
     /// Wether this load should replace the current entry (reload). If true, the current
     /// entry will be replaced instead of a new entry being added.
     pub replace: bool,
@@ -610,94 +599,6 @@ pub struct IFrameLoadInfoWithData {
     pub sandbox: IFrameSandboxState,
 }
 
-// https://developer.mozilla.org/en-US/docs/Web/API/Using_the_Browser_API#Events
-/// The events fired in a Browser API context (`<iframe mozbrowser>`)
-#[derive(Deserialize, Serialize)]
-pub enum MozBrowserEvent {
-    /// Sent when the scroll position within a browser `<iframe>` changes.
-    AsyncScroll,
-    /// Sent when window.close() is called within a browser `<iframe>`.
-    Close,
-    /// Sent when a browser `<iframe>` tries to open a context menu. This allows
-    /// handling `<menuitem>` element available within the browser `<iframe>`'s content.
-    ContextMenu,
-    /// Sent when an error occurred while trying to load content within a browser `<iframe>`.
-    /// Includes a human-readable description, and a machine-readable report.
-    Error(MozBrowserErrorType, String, String),
-    /// Sent when the favicon of a browser `<iframe>` changes.
-    IconChange(String, String, String),
-    /// Sent when the browser `<iframe>` has reached the server.
-    Connected,
-    /// Sent when the browser `<iframe>` has finished loading all its assets.
-    LoadEnd,
-    /// Sent when the browser `<iframe>` starts to load a new page.
-    LoadStart,
-    /// Sent when a browser `<iframe>`'s location changes.
-    LocationChange(String, bool, bool),
-    /// Sent when a new tab is opened within a browser `<iframe>` as a result of the user
-    /// issuing a command to open a link target in a new tab (for example ctrl/cmd + click.)
-    /// Includes the URL.
-    OpenTab(String),
-    /// Sent when a new window is opened within a browser `<iframe>`.
-    /// Includes the URL, target browsing context name, and features.
-    OpenWindow(String, Option<String>, Option<String>),
-    /// Sent when the SSL state changes within a browser `<iframe>`.
-    SecurityChange(HttpsState),
-    /// Sent when alert(), confirm(), or prompt() is called within a browser `<iframe>`.
-    ShowModalPrompt(String, String, String, String), // TODO(simartin): Handle unblock()
-    /// Sent when the document.title changes within a browser `<iframe>`.
-    TitleChange(String),
-    /// Sent when an HTTP authentification is requested.
-    UsernameAndPasswordRequired,
-    /// Sent when a link to a search engine is found.
-    OpenSearch,
-    /// Sent when visibility state changes.
-    VisibilityChange(bool),
-}
-
-impl MozBrowserEvent {
-    /// Get the name of the event as a `& str`
-    pub fn name(&self) -> &'static str {
-        match *self {
-            MozBrowserEvent::AsyncScroll => "mozbrowserasyncscroll",
-            MozBrowserEvent::Close => "mozbrowserclose",
-            MozBrowserEvent::Connected => "mozbrowserconnected",
-            MozBrowserEvent::ContextMenu => "mozbrowsercontextmenu",
-            MozBrowserEvent::Error(_, _, _) => "mozbrowsererror",
-            MozBrowserEvent::IconChange(_, _, _) => "mozbrowsericonchange",
-            MozBrowserEvent::LoadEnd => "mozbrowserloadend",
-            MozBrowserEvent::LoadStart => "mozbrowserloadstart",
-            MozBrowserEvent::LocationChange(_, _, _) => "mozbrowserlocationchange",
-            MozBrowserEvent::OpenTab(_) => "mozbrowseropentab",
-            MozBrowserEvent::OpenWindow(_, _, _) => "mozbrowseropenwindow",
-            MozBrowserEvent::SecurityChange(_) => "mozbrowsersecuritychange",
-            MozBrowserEvent::ShowModalPrompt(_, _, _, _) => "mozbrowsershowmodalprompt",
-            MozBrowserEvent::TitleChange(_) => "mozbrowsertitlechange",
-            MozBrowserEvent::UsernameAndPasswordRequired => "mozbrowserusernameandpasswordrequired",
-            MozBrowserEvent::OpenSearch => "mozbrowseropensearch",
-            MozBrowserEvent::VisibilityChange(_) => "mozbrowservisibilitychange",
-        }
-    }
-}
-
-// https://developer.mozilla.org/en-US/docs/Web/Events/mozbrowsererror
-/// The different types of Browser error events
-#[derive(Deserialize, Serialize)]
-pub enum MozBrowserErrorType {
-    // For the moment, we are just reporting panics, using the "fatal" type.
-    /// A fatal error
-    Fatal,
-}
-
-impl MozBrowserErrorType {
-    /// Get the name of the error type as a `& str`
-    pub fn name(&self) -> &'static str {
-        match *self {
-            MozBrowserErrorType::Fatal => "fatal",
-        }
-    }
-}
-
 /// Specifies whether the script or layout thread needs to be ticked for animation.
 #[derive(Deserialize, Serialize)]
 pub enum AnimationTickType {
@@ -711,24 +612,24 @@ pub enum AnimationTickType {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct ScrollState {
     /// The ID of the scroll root.
-    pub scroll_root_id: ClipId,
+    pub scroll_id: ExternalScrollId,
     /// The scrolling offset of this stacking context.
     pub scroll_offset: Vector2D<f32>,
 }
 
 /// Data about the window size.
-#[derive(Clone, Copy, Deserialize, HeapSizeOf, Serialize)]
+#[derive(Clone, Copy, Deserialize, MallocSizeOf, Serialize)]
 pub struct WindowSizeData {
     /// The size of the initial layout viewport, before parsing an
-    /// http://www.w3.org/TR/css-device-adapt/#initial-viewport
+    /// <http://www.w3.org/TR/css-device-adapt/#initial-viewport>
     pub initial_viewport: TypedSize2D<f32, CSSPixel>,
 
     /// The resolution of the window in dppx, not including any "pinch zoom" factor.
-    pub device_pixel_ratio: ScaleFactor<f32, CSSPixel, DevicePixel>,
+    pub device_pixel_ratio: TypedScale<f32, CSSPixel, DevicePixel>,
 }
 
 /// The type of window size change.
-#[derive(Clone, Copy, Deserialize, Eq, HeapSizeOf, PartialEq, Serialize)]
+#[derive(Clone, Copy, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
 pub enum WindowSizeType {
     /// Initial load.
     Initial,
@@ -796,6 +697,10 @@ pub enum ConstellationMsg {
     CloseBrowser(TopLevelBrowsingContextId),
     /// Make browser visible.
     SelectBrowser(TopLevelBrowsingContextId),
+    /// Forward an event to the script task of the given pipeline.
+    ForwardEvent(PipelineId, CompositorEvent),
+    /// Requesting a change to the onscreen cursor.
+    SetCursor(CursorKind),
 }
 
 /// Resources required by workerglobalscopes
@@ -851,13 +756,13 @@ impl From<RecvTimeoutError> for PaintWorkletError {
 
 /// Execute paint code in the worklet thread pool.
 pub trait Painter: SpeculativePainter {
-    /// https://drafts.css-houdini.org/css-paint-api/#draw-a-paint-image
+    /// <https://drafts.css-houdini.org/css-paint-api/#draw-a-paint-image>
     fn draw_a_paint_image(&self,
                           size: TypedSize2D<f32, CSSPixel>,
-                          zoom: ScaleFactor<f32, CSSPixel, DevicePixel>,
+                          zoom: TypedScale<f32, CSSPixel, DevicePixel>,
                           properties: Vec<(Atom, String)>,
                           arguments: Vec<String>)
-                          -> DrawAPaintImageResult;
+                          -> Result<DrawAPaintImageResult, PaintWorkletError>;
 }
 
 impl fmt::Debug for Painter {
@@ -867,8 +772,9 @@ impl fmt::Debug for Painter {
 }
 
 /// The result of executing paint code: the image together with any image URLs that need to be loaded.
-/// TODO: this should return a WR display list. https://github.com/servo/servo/issues/17497
-#[derive(Clone, Debug, Deserialize, HeapSizeOf, Serialize)]
+///
+/// TODO: this should return a WR display list. <https://github.com/servo/servo/issues/17497>
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct DrawAPaintImageResult {
     /// The image height
     pub width: u32,

@@ -21,12 +21,12 @@ use std::str;
 pub struct Headers {
     reflector_: Reflector,
     guard: Cell<Guard>,
-    #[ignore_heap_size_of = "Defined in hyper"]
+    #[ignore_malloc_size_of = "Defined in hyper"]
     header_list: DomRefCell<HyperHeaders>
 }
 
 // https://fetch.spec.whatwg.org/#concept-headers-guard
-#[derive(Clone, Copy, HeapSizeOf, JSTraceable, PartialEq)]
+#[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
 pub enum Guard {
     Immutable,
     Request,
@@ -45,7 +45,7 @@ impl Headers {
     }
 
     pub fn new(global: &GlobalScope) -> DomRoot<Headers> {
-        reflect_dom_object(box Headers::new_inherited(), global, HeadersWrap)
+        reflect_dom_object(Box::new(Headers::new_inherited()), global, HeadersWrap)
     }
 
     // https://fetch.spec.whatwg.org/#dom-headers
@@ -232,6 +232,12 @@ impl Headers {
 
     pub fn set_headers(&self, hyper_headers: HyperHeaders) {
         *self.header_list.borrow_mut() = hyper_headers;
+    }
+
+    pub fn get_headers_list(&self) -> HyperHeaders {
+        let mut headers = HyperHeaders::new();
+        headers.extend(self.header_list.borrow_mut().iter());
+        headers
     }
 
     // https://fetch.spec.whatwg.org/#concept-header-extract-mime-type

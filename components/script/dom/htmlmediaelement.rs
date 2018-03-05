@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use audio_video_metadata;
 use document_loader::{LoadBlocker, LoadType};
 use dom::attr::Attr;
 use dom::bindings::cell::DomRefCell;
@@ -18,15 +17,16 @@ use dom::bindings::error::{Error, ErrorResult};
 use dom::bindings::inheritance::Castable;
 use dom::bindings::refcounted::Trusted;
 use dom::bindings::reflector::DomObject;
-use dom::bindings::root::{DomRoot, MutNullableDom};
+use dom::bindings::root::{DomRoot, MutNullableDom, LayoutDom};
 use dom::bindings::str::DOMString;
+use dom::blob::Blob;
 use dom::document::Document;
 use dom::element::{Element, AttributeMutation};
 use dom::eventtarget::EventTarget;
 use dom::htmlelement::HTMLElement;
 use dom::htmlsourceelement::HTMLSourceElement;
 use dom::mediaerror::MediaError;
-use dom::node::{window_from_node, document_from_node, Node, UnbindContext};
+use dom::node::{window_from_node, document_from_node, Node, UnbindContext, NodeDamage};
 use dom::promise::Promise;
 use dom::virtualmethods::VirtualMethods;
 use dom_struct::dom_struct;
@@ -36,56 +36,82 @@ use ipc_channel::router::ROUTER;
 use microtask::{Microtask, MicrotaskRunnable};
 use mime::{Mime, SubLevel, TopLevel};
 use net_traits::{FetchResponseListener, FetchMetadata, Metadata, NetworkError};
-use net_traits::request::{CredentialsMode, Destination, RequestInit, Type as RequestType};
+use net_traits::request::{CredentialsMode, Destination, RequestInit};
 use network_listener::{NetworkListener, PreInvoke};
 use script_thread::ScriptThread;
 use servo_url::ServoUrl;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::mem;
 use std::rc::Rc;
+use playground::{self, player};
 use std::sync::{Arc, Mutex};
 use task_source::TaskSource;
 use time::{self, Timespec, Duration};
+use script_layout_interface::{HTMLMediaData, HTMLMediaFrameSource};
+use dom::bindings::trace::JSTraceable;
+use js::jsapi::JSTracer;
+use webrender_api;
+
+// TODO(philn): this doesn't belong here.
+#[allow(unsafe_code)]
+unsafe impl JSTraceable for RefCell<playground::player::Player> {
+    unsafe fn trace(&self, _trc: *mut JSTracer) {
+    }
+}
+
+#[allow(unsafe_code)]
+unsafe impl JSTraceable for WebrenderFrameRenderer {
+    unsafe fn trace(&self, _trc: *mut JSTracer) {
+    }
+}
 
 #[dom_struct]
 // FIXME(nox): A lot of tasks queued for this element should probably be in the
 // media element event task source.
 pub struct HTMLMediaElement {
     htmlelement: HTMLElement,
-    /// https://html.spec.whatwg.org/multipage/#dom-media-networkstate
+    /// <https://html.spec.whatwg.org/multipage/#dom-media-networkstate>
     network_state: Cell<NetworkState>,
-    /// https://html.spec.whatwg.org/multipage/#dom-media-readystate
+    /// <https://html.spec.whatwg.org/multipage/#dom-media-readystate>
     ready_state: Cell<ReadyState>,
-    /// https://html.spec.whatwg.org/multipage/#dom-media-currentsrc
+    /// <https://html.spec.whatwg.org/multipage/#dom-media-srcobject>
+    src_object: MutNullableDom<Blob>,
+    /// <https://html.spec.whatwg.org/multipage/#dom-media-currentsrc>
     current_src: DomRefCell<String>,
     /// Incremented whenever tasks associated with this element are cancelled.
     generation_id: Cell<u32>,
-    /// https://html.spec.whatwg.org/multipage/#fire-loadeddata
+    /// <https://html.spec.whatwg.org/multipage/#fire-loadeddata>
     ///
     /// Reset to false every time the load algorithm is invoked.
     fired_loadeddata_event: Cell<bool>,
-    /// https://html.spec.whatwg.org/multipage/#dom-media-error
+    /// <https://html.spec.whatwg.org/multipage/#dom-media-error>
     error: MutNullableDom<MediaError>,
-    /// https://html.spec.whatwg.org/multipage/#dom-media-paused
+    /// <https://html.spec.whatwg.org/multipage/#dom-media-paused>
     paused: Cell<bool>,
-    /// https://html.spec.whatwg.org/multipage/#attr-media-autoplay
+    /// <https://html.spec.whatwg.org/multipage/#attr-media-autoplay>
     autoplaying: Cell<bool>,
-    /// https://html.spec.whatwg.org/multipage/#delaying-the-load-event-flag
+    /// <https://html.spec.whatwg.org/multipage/#delaying-the-load-event-flag>
     delaying_the_load_event_flag: DomRefCell<Option<LoadBlocker>>,
-    /// https://html.spec.whatwg.org/multipage/#list-of-pending-play-promises
-    #[ignore_heap_size_of = "promises are hard"]
+    /// <https://html.spec.whatwg.org/multipage/#list-of-pending-play-promises>
+    #[ignore_malloc_size_of = "promises are hard"]
     pending_play_promises: DomRefCell<Vec<Rc<Promise>>>,
     /// Play promises which are soon to be fulfilled by a queued task.
-    #[ignore_heap_size_of = "promises are hard"]
+    #[ignore_malloc_size_of = "promises are hard"]
     in_flight_play_promises_queue: DomRefCell<VecDeque<(Box<[Rc<Promise>]>, ErrorResult)>>,
     /// The details of the video currently related to this media element.
     // FIXME(nox): Why isn't this in HTMLVideoElement?
     video: DomRefCell<Option<VideoMedia>>,
+    /// Whether the media metadata has been completely received.
+    have_metadata: Cell<bool>,
+    #[ignore_malloc_size_of = "oops"]
+    player: RefCell<player::Player>,
+    #[ignore_malloc_size_of = "oops"]
+    frame_renderer: WebrenderFrameRenderer,
 }
 
-/// https://html.spec.whatwg.org/multipage/#dom-media-networkstate
-#[derive(Clone, Copy, HeapSizeOf, JSTraceable, PartialEq)]
+/// <https://html.spec.whatwg.org/multipage/#dom-media-networkstate>
+#[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
 #[repr(u8)]
 pub enum NetworkState {
     Empty = HTMLMediaElementConstants::NETWORK_EMPTY as u8,
@@ -94,8 +120,8 @@ pub enum NetworkState {
     NoSource = HTMLMediaElementConstants::NETWORK_NO_SOURCE as u8,
 }
 
-/// https://html.spec.whatwg.org/multipage/#dom-media-readystate
-#[derive(Clone, Copy, HeapSizeOf, JSTraceable, PartialEq, PartialOrd)]
+/// <https://html.spec.whatwg.org/multipage/#dom-media-readystate>
+#[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq, PartialOrd)]
 #[repr(u8)]
 enum ReadyState {
     HaveNothing = HTMLMediaElementConstants::HAVE_NOTHING as u8,
@@ -105,15 +131,125 @@ enum ReadyState {
     HaveEnoughData = HTMLMediaElementConstants::HAVE_ENOUGH_DATA as u8,
 }
 
-#[derive(HeapSizeOf, JSTraceable)]
+#[derive(MallocSizeOf, JSTraceable, Debug)]
 pub struct VideoMedia {
     format: String,
-    #[ignore_heap_size_of = "defined in time"]
+    #[ignore_malloc_size_of = "defined in time"]
     duration: Duration,
     width: u32,
     height: u32,
     video: String,
     audio: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct WebrenderFrameRenderer {
+    inner: Arc<Mutex<WebrenderFrameRendererInner>>,
+}
+
+struct WebrenderFrameRendererInner{
+    webrender_api: webrender_api::RenderApi,
+    current_frame: Option<(webrender_api::ImageKey, i32, i32)>,
+    old_frame: Option<webrender_api::ImageKey>,
+    very_old_frame: Option<webrender_api::ImageKey>,
+}
+
+impl WebrenderFrameRenderer {
+    fn new(webrender_api_sender: webrender_api::RenderApiSender) -> WebrenderFrameRenderer {
+        WebrenderFrameRenderer {
+            inner: Arc::new(Mutex::new(WebrenderFrameRendererInner {
+                webrender_api: webrender_api_sender.create_api(),
+                current_frame: None,
+                old_frame: None,
+                very_old_frame: None,
+            })),
+        }
+    }
+}
+
+impl HTMLMediaFrameSource for WebrenderFrameRenderer {
+    fn get_current_frame(&self) -> Option<(webrender_api::ImageKey, i32, i32)> {
+        let inner = self.inner.lock().unwrap();
+        inner.current_frame.clone()
+    }
+
+    fn clone_boxed(&self) -> Box<HTMLMediaFrameSource> {
+        Box::new(self.clone())
+    }
+}
+
+impl WebrenderFrameRendererInner {
+    fn render(&mut self, frame: playground::player::Frame) {
+        let descriptor = webrender_api::ImageDescriptor {
+            width: frame.get_width() as u32,
+            height: frame.get_height() as u32,
+            stride: None, //Some(width * 4),
+            format: webrender_api::ImageFormat::BGRA8,
+            offset: 0,
+            is_opaque: false,
+        };
+        let data = webrender_api::ImageData::Raw(frame.get_data().clone());
+
+        let mut updates = webrender_api::ResourceUpdates::new();
+
+        if let Some(old_image_key) = mem::replace(&mut self.very_old_frame, self.old_frame.take()) {
+            updates.delete_image(old_image_key);
+        }
+
+        match self.current_frame {
+            Some((ref image_key, ref mut width, ref mut height)) if *width == frame.get_width() && *height == frame.get_height() => {
+                updates.update_image(*image_key, descriptor, data, None);
+                *width = frame.get_width();
+                *height = frame.get_height();
+
+                if let Some(old_image_key) = self.old_frame.take() {
+                    updates.delete_image(old_image_key);
+                }
+            },
+            Some((ref mut image_key, ref mut width, ref mut height)) => {
+                self.old_frame = Some(*image_key);
+
+                let new_image_key = self.webrender_api.generate_image_key();
+                updates.add_image(new_image_key, descriptor, data, None);
+                *image_key = new_image_key;
+                *width = frame.get_width();
+                *height = frame.get_height();
+            },
+            None => {
+                let image_key = self.webrender_api.generate_image_key();
+                updates.add_image(image_key, descriptor, data, None);
+                self.current_frame = Some((image_key, frame.get_width(), frame.get_height()));
+            }
+        }
+
+        self.webrender_api.update_resources(updates);
+    }
+}
+
+impl playground::player::FrameRenderer for WebrenderFrameRenderer {
+    fn render(&self, frame: playground::player::Frame) {
+        self.inner.lock().unwrap().render(frame)
+    }
+}
+
+impl Drop for WebrenderFrameRendererInner {
+    fn drop(&mut self) {
+        let mut updates = webrender_api::ResourceUpdates::new();
+
+        if let Some((image_key, _, _)) = self.current_frame.take() {
+            updates.delete_image(image_key);
+        }
+
+        if let Some(image_key) = self.old_frame.take() {
+            updates.delete_image(image_key);
+        }
+
+        if let Some(image_key) = self.very_old_frame.take() {
+            updates.delete_image(image_key);
+        }
+
+        self.webrender_api.update_resources(updates);
+    }
 }
 
 impl HTMLMediaElement {
@@ -122,10 +258,12 @@ impl HTMLMediaElement {
         prefix: Option<Prefix>,
         document: &Document,
     ) -> Self {
+        playground::initialize();
         Self {
             htmlelement: HTMLElement::new_inherited(tag_name, prefix, document),
             network_state: Cell::new(NetworkState::Empty),
             ready_state: Cell::new(ReadyState::HaveNothing),
+            src_object: Default::default(),
             current_src: DomRefCell::new("".to_owned()),
             generation_id: Cell::new(0),
             fired_loadeddata_event: Cell::new(false),
@@ -137,6 +275,9 @@ impl HTMLMediaElement {
             pending_play_promises: Default::default(),
             in_flight_play_promises_queue: Default::default(),
             video: DomRefCell::new(None),
+            have_metadata: Cell::new(false),
+            player: RefCell::new(player::Player::new()),
+            frame_renderer: WebrenderFrameRenderer::new(document.window().get_webrender_api_sender()),
         }
     }
 
@@ -156,7 +297,7 @@ impl HTMLMediaElement {
     /// Nothing happens if the element was already delaying the load event and
     /// we pass true to that method again.
     ///
-    /// https://html.spec.whatwg.org/multipage/#delaying-the-load-event-flag
+    /// <https://html.spec.whatwg.org/multipage/#delaying-the-load-event-flag>
     fn delay_load_event(&self, delay: bool) {
         let mut blocker = self.delaying_the_load_event_flag.borrow_mut();
         if delay && blocker.is_none() {
@@ -166,7 +307,7 @@ impl HTMLMediaElement {
         }
     }
 
-    /// https://html.spec.whatwg.org/multipage/#dom-media-play
+    /// <https://html.spec.whatwg.org/multipage/#dom-media-play>
     // FIXME(nox): Move this back to HTMLMediaElementMethods::Play once
     // Rc<Promise> doesn't require #[allow(unrooted_must_root)] anymore.
     fn play(&self, promise: &Rc<Promise>) {
@@ -247,7 +388,79 @@ impl HTMLMediaElement {
         // Not applicable here, the promise is returned from Play.
     }
 
-    /// https://html.spec.whatwg.org/multipage/#internal-pause-steps
+    fn start(&self) {
+        let (action_sender, action_receiver) = ipc::channel().unwrap();
+        let trusted_node = Trusted::new(self);
+        let win = window_from_node(self);
+        let task_source = win.dom_manipulation_task_source();
+        let task_canceller = win.task_canceller();
+        ROUTER.add_route(action_receiver.to_opaque(), Box::new(move |message| {
+            let event: playground::player::PlayerEvent = message.to().unwrap();
+            println!("Event received: {:?}", event);
+            let element = trusted_node.clone();
+            let _ = task_source.queue_with_canceller(
+                task!(handle_fire_player_event: move || {
+                    element.root().handle_player_event(&event);
+                }),
+                &task_canceller,
+            );
+        }));
+
+        let player = self.player.borrow();
+        player.register_event_handler(action_sender);
+        player.register_frame_renderer(self.frame_renderer.clone());
+        player.start();
+    }
+
+    fn handle_player_event(&self, event: &playground::player::PlayerEvent) {
+        match *event {
+            playground::player::PlayerEvent::MetadataUpdated(ref metadata) => {
+                println!("Metadata: {:?}", metadata);
+                if !self.have_metadata.get() {
+                    // https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list
+                    // => "Once enough of the media data has been fetched to determine the duration..."
+                    if let Some(dur) = metadata.duration {
+                        *self.video.borrow_mut() = Some(VideoMedia {
+                            format: metadata.format.clone(),
+                            duration: Duration::seconds(dur.as_secs() as i64) +
+                                Duration::nanoseconds(dur.subsec_nanos() as i64),
+                            width: metadata.width,
+                            height: metadata.height,
+                            video: metadata.video_tracks[0].clone(),
+                            audio: Some(metadata.audio_tracks[0].clone()),
+                        });
+
+                        // Step 6
+                        self.change_ready_state(ReadyState::HaveMetadata);
+                        self.have_metadata.set(true);
+                    }
+                } else {
+                    self.change_ready_state(ReadyState::HaveCurrentData);
+                }
+            }
+            playground::player::PlayerEvent::StateChanged(ref state) => {
+                match *state {
+                    playground::player::PlaybackState::Paused => {
+                        println!("Paused!!");
+                        self.paused.set(true);
+                    }
+                    _ => {}
+                }
+            }
+            playground::player::PlayerEvent::EndOfStream => {
+                println!("EOS!");
+            }
+            playground::player::PlayerEvent::FrameUpdated => {
+                self.upcast::<Node>().dirty(NodeDamage::OtherNodeDamage);
+            }
+            playground::player::PlayerEvent::Error => {
+                println!("Error!");
+                self.error.set(Some(&*MediaError::new(&*window_from_node(&*self), MEDIA_ERR_DECODE)));
+                self.upcast::<EventTarget>().fire_event(atom!("error"));
+            }
+         }
+     }
+ 
     fn internal_pause_steps(&self) {
         // Step 1.
         self.autoplaying.set(false);
@@ -298,6 +511,10 @@ impl HTMLMediaElement {
     fn notify_about_playing(&self) {
         // Step 1.
         self.take_pending_play_promises(Ok(()));
+
+        // phil
+        let player = self.player.borrow();
+        player.play();
 
         // Step 2.
         let window = window_from_node(self);
@@ -445,6 +662,7 @@ impl HTMLMediaElement {
         let doc = document_from_node(self);
         let task = MediaElementMicrotask::ResourceSelectionTask {
             elem: DomRoot::from_ref(self),
+            generation_id: self.generation_id.get(),
             base_url: doc.base_url()
         };
 
@@ -462,13 +680,14 @@ impl HTMLMediaElement {
 
         // Step 6.
         enum Mode {
-            // FIXME(nox): Support media object provider.
-            #[allow(dead_code)]
             Object,
             Attribute(String),
             Children(DomRoot<HTMLSourceElement>),
         }
         fn mode(media: &HTMLMediaElement) -> Option<Mode> {
+            if media.src_object.get().is_some() {
+                return Some(Mode::Object);
+            }
             if let Some(attr) = media.upcast::<Element>().get_attribute(&ns!(), &local_name!("src")) {
                 return Some(Mode::Attribute(attr.Value().into()));
             }
@@ -514,7 +733,6 @@ impl HTMLMediaElement {
                 // Step 9.obj.3.
                 // Note that the resource fetch algorithm itself takes care
                 // of the cleanup in case of failure itself.
-                // FIXME(nox): Pass the assigned media provider here.
                 self.resource_fetch_algorithm(Resource::Object);
             },
             Mode::Attribute(src) => {
@@ -596,14 +814,13 @@ impl HTMLMediaElement {
                 // Step 4.remote.2.
                 // FIXME(nox): Handle CORS setting from crossorigin attribute.
                 let document = document_from_node(self);
-                let type_ = match self.media_type_id() {
-                    HTMLMediaElementTypeId::HTMLAudioElement => RequestType::Audio,
-                    HTMLMediaElementTypeId::HTMLVideoElement => RequestType::Video,
+                let destination = match self.media_type_id() {
+                    HTMLMediaElementTypeId::HTMLAudioElement => Destination::Audio,
+                    HTMLMediaElementTypeId::HTMLVideoElement => Destination::Video,
                 };
                 let request = RequestInit {
                     url,
-                    type_,
-                    destination: Destination::Media,
+                    destination,
                     credentials_mode: CredentialsMode::Include,
                     use_url_credentials: true,
                     origin: document.origin().immutable().clone(),
@@ -614,6 +831,7 @@ impl HTMLMediaElement {
                 };
 
                 let context = Arc::new(Mutex::new(HTMLMediaElementContext::new(self)));
+                self.start();
                 let (action_sender, action_receiver) = ipc::channel().unwrap();
                 let window = window_from_node(self);
                 let listener = NetworkListener {
@@ -621,13 +839,13 @@ impl HTMLMediaElement {
                     task_source: window.networking_task_source(),
                     canceller: Some(window.task_canceller())
                 };
-                ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
+                ROUTER.add_route(action_receiver.to_opaque(), Box::new(move |message| {
                     listener.notify_fetch(message.to().unwrap());
-                });
+                }));
                 document.loader().fetch_async_background(request, action_sender);
             },
             Resource::Object => {
-                // FIXME(nox): Use the current media resource.
+                // FIXME(nox): Actually do something with the object.
                 self.queue_dedicated_media_source_failure_steps();
             },
         }
@@ -687,12 +905,10 @@ impl HTMLMediaElement {
         // this invokation of the load algorithm.
         self.fired_loadeddata_event.set(false);
 
-        // Step 1.
-        // FIXME(nox): Abort any already-running instance of the
-        // resource selection algorithm.
-
-        // Steps 2-4.
+        // Step 1-2.
         self.generation_id.set(self.generation_id.get() + 1);
+
+        // Steps 3-4.
         while !self.in_flight_play_promises_queue.borrow().is_empty() {
             self.fulfill_in_flight_play_promises(|| ());
         }
@@ -819,7 +1035,7 @@ impl HTMLMediaElement {
 
     /// Handles insertion of `source` children.
     ///
-    /// https://html.spec.whatwg.org/multipage/#the-source-element:nodes-are-inserted
+    /// <https://html.spec.whatwg.org/multipage/#the-source-element:nodes-are-inserted>
     pub fn handle_source_child_insertion(&self) {
         if self.upcast::<Element>().has_attribute(&local_name!("src")) {
             return;
@@ -828,6 +1044,23 @@ impl HTMLMediaElement {
             return;
         }
         self.media_element_load_algorithm();
+    }
+}
+
+pub trait LayoutHTMLMediaElementHelpers {
+    fn data(&self) -> HTMLMediaData;
+}
+
+impl LayoutHTMLMediaElementHelpers for LayoutDom<HTMLMediaElement> {
+    #[allow(unsafe_code)]
+    fn data(&self) -> HTMLMediaData {
+        unsafe {
+            let media = &*self.unsafe_get();
+
+            HTMLMediaData {
+                frame_source: Box::new(media.frame_renderer.clone()),
+            }
+        }
     }
 }
 
@@ -849,8 +1082,20 @@ impl HTMLMediaElementMethods for HTMLMediaElement {
 
     // https://html.spec.whatwg.org/multipage/#dom-media-src
     make_url_getter!(Src, "src");
+
     // https://html.spec.whatwg.org/multipage/#dom-media-src
     make_setter!(SetSrc, "src");
+
+    // https://html.spec.whatwg.org/multipage/#dom-media-srcobject
+    fn GetSrcObject(&self) -> Option<DomRoot<Blob>> {
+        self.src_object.get()
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-media-srcobject
+    fn SetSrcObject(&self, value: Option<&Blob>) {
+        self.src_object.set(value);
+        self.media_element_load_algorithm();
+    }
 
     // https://html.spec.whatwg.org/multipage/#attr-media-preload
     // Missing value default is user-agent defined.
@@ -940,11 +1185,12 @@ impl VirtualMethods for HTMLMediaElement {
     }
 }
 
-#[derive(HeapSizeOf, JSTraceable)]
+#[derive(JSTraceable, MallocSizeOf)]
 pub enum MediaElementMicrotask {
     ResourceSelectionTask {
         elem: DomRoot<HTMLMediaElement>,
-        base_url: ServoUrl
+        generation_id: u32,
+        base_url: ServoUrl,
     },
     PauseIfNotInDocumentTask {
         elem: DomRoot<HTMLMediaElement>,
@@ -954,8 +1200,10 @@ pub enum MediaElementMicrotask {
 impl MicrotaskRunnable for MediaElementMicrotask {
     fn handler(&self) {
         match self {
-            &MediaElementMicrotask::ResourceSelectionTask { ref elem, ref base_url } => {
-                elem.resource_selection_algorithm_sync(base_url.clone());
+            &MediaElementMicrotask::ResourceSelectionTask { ref elem, generation_id, ref base_url } => {
+                if generation_id == elem.generation_id.get() {
+                    elem.resource_selection_algorithm_sync(base_url.clone());
+                }
             },
             &MediaElementMicrotask::PauseIfNotInDocumentTask { ref elem } => {
                 if !elem.upcast::<Node>().is_in_doc() {
@@ -971,11 +1219,12 @@ enum Resource {
     Url(ServoUrl),
 }
 
+#[derive(Clone)]
 struct HTMLMediaElementContext {
     /// The element that initiated the request.
     elem: Trusted<HTMLMediaElement>,
     /// The response body received to date.
-    data: Vec<u8>,
+    //data: Vec<u8>,
     /// The response metadata received to date.
     metadata: Option<Metadata>,
     /// The generation of the media element when this fetch started.
@@ -983,7 +1232,7 @@ struct HTMLMediaElementContext {
     /// Time of last progress notification.
     next_progress_event: Timespec,
     /// Whether the media metadata has been completely received.
-    have_metadata: bool,
+    //have_metadata: bool,
     /// True if this response is invalid and should be ignored.
     ignore_response: bool,
 }
@@ -1015,23 +1264,23 @@ impl FetchResponseListener for HTMLMediaElementContext {
         }
     }
 
-    fn process_response_chunk(&mut self, mut payload: Vec<u8>) {
+    fn process_response_chunk(&mut self, payload: Vec<u8>) {
         if self.ignore_response {
             // An error was received previously, skip processing the payload.
             return;
         }
 
-        self.data.append(&mut payload);
-
         let elem = self.elem.root();
+        let player = elem.player.borrow();
+        player.push_data(payload);
 
         // https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list
         // => "Once enough of the media data has been fetched to determine the duration..."
-        if !self.have_metadata {
-            self.check_metadata(&elem);
-        } else {
-            elem.change_ready_state(ReadyState::HaveCurrentData);
-        }
+        // if !self.have_metadata {
+        //     self.check_metadata(&elem);
+        // } else {
+        //     elem.change_ready_state(ReadyState::HaveCurrentData);
+        // }
 
         // https://html.spec.whatwg.org/multipage/#concept-media-load-resource step 4,
         // => "If mode is remote" step 2
@@ -1054,13 +1303,17 @@ impl FetchResponseListener for HTMLMediaElementContext {
         }
         let elem = self.elem.root();
 
+        let player = elem.player.borrow();
+        player.end_of_stream();
+
         // => "If the media data can be fetched but is found by inspection to be in an unsupported
         //     format, or can otherwise not be rendered at all"
-        if !self.have_metadata {
-            elem.queue_dedicated_media_source_failure_steps();
-        }
+        // if !elem.have_metadata.get() {
+        //     elem.queue_dedicated_media_source_failure_steps();
+        // }
         // => "Once the entire media resource has been fetched..."
-        else if status.is_ok() {
+        if status.is_ok() {
+            println!("ok");
             elem.change_ready_state(ReadyState::HaveEnoughData);
 
             elem.upcast::<EventTarget>().fire_event(atom!("progress"));
@@ -1101,33 +1354,18 @@ impl HTMLMediaElementContext {
     fn new(elem: &HTMLMediaElement) -> HTMLMediaElementContext {
         HTMLMediaElementContext {
             elem: Trusted::new(elem),
-            data: vec![],
             metadata: None,
             generation_id: elem.generation_id.get(),
             next_progress_event: time::get_time() + Duration::milliseconds(350),
-            have_metadata: false,
             ignore_response: false,
         }
     }
 
-    fn check_metadata(&mut self, elem: &HTMLMediaElement) {
-        match audio_video_metadata::get_format_from_slice(&self.data) {
-            Ok(audio_video_metadata::Metadata::Video(meta)) => {
-                let dur = meta.audio.duration.unwrap_or(::std::time::Duration::new(0, 0));
-                *elem.video.borrow_mut() = Some(VideoMedia {
-                    format: format!("{:?}", meta.format),
-                    duration: Duration::seconds(dur.as_secs() as i64) +
-                              Duration::nanoseconds(dur.subsec_nanos() as i64),
-                    width: meta.dimensions.width,
-                    height: meta.dimensions.height,
-                    video: meta.video.unwrap_or("".to_owned()),
-                    audio: meta.audio.audio,
-                });
-                // Step 6
-                elem.change_ready_state(ReadyState::HaveMetadata);
-                self.have_metadata = true;
-            }
-            _ => {}
+    /*fn check_metadata(&mut self, elem: &HTMLMediaElement) {
+        if audio_video_metadata::get_format_from_slice(&self.data).is_ok() {
+            // Step 6.
+            elem.change_ready_state(ReadyState::HaveMetadata);
+            self.have_metadata = true;
         }
-    }
+    }*/
 }

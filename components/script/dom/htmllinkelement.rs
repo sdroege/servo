@@ -24,9 +24,8 @@ use dom::virtualmethods::VirtualMethods;
 use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix};
 use net_traits::ReferrerPolicy;
-use script_traits::{MozBrowserEvent, ScriptMsg};
+use script_traits::ScriptMsg;
 use servo_arc::Arc;
-use std::ascii::AsciiExt;
 use std::borrow::ToOwned;
 use std::cell::Cell;
 use std::default::Default;
@@ -35,10 +34,10 @@ use style::media_queries::parse_media_query_list;
 use style::parser::ParserContext as CssParserContext;
 use style::str::HTML_SPACE_CHARACTERS;
 use style::stylesheets::{CssRuleType, Stylesheet};
-use style_traits::PARSING_MODE_DEFAULT;
+use style_traits::ParsingMode;
 use stylesheet_loader::{StylesheetLoader, StylesheetContextSource, StylesheetOwner};
 
-#[derive(Clone, Copy, HeapSizeOf, JSTraceable, PartialEq)]
+#[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
 pub struct RequestGenerationId(u32);
 
 impl RequestGenerationId {
@@ -51,11 +50,11 @@ impl RequestGenerationId {
 pub struct HTMLLinkElement {
     htmlelement: HTMLElement,
     rel_list: MutNullableDom<DOMTokenList>,
-    #[ignore_heap_size_of = "Arc"]
+    #[ignore_malloc_size_of = "Arc"]
     stylesheet: DomRefCell<Option<Arc<Stylesheet>>>,
     cssom_stylesheet: MutNullableDom<CSSStyleSheet>,
 
-    /// https://html.spec.whatwg.org/multipage/#a-style-sheet-that-is-blocking-scripts
+    /// <https://html.spec.whatwg.org/multipage/#a-style-sheet-that-is-blocking-scripts>
     parser_inserted: Cell<bool>,
     /// The number of loads that this link element has triggered (could be more
     /// than one because of imports) and have not yet finished.
@@ -86,7 +85,7 @@ impl HTMLLinkElement {
                prefix: Option<Prefix>,
                document: &Document,
                creator: ElementCreator) -> DomRoot<HTMLLinkElement> {
-        Node::reflect_node(box HTMLLinkElement::new_inherited(local_name, prefix, document, creator),
+        Node::reflect_node(Box::new(HTMLLinkElement::new_inherited(local_name, prefix, document, creator)),
                            document,
                            HTMLLinkElementBinding::Wrap)
     }
@@ -156,7 +155,7 @@ fn string_is_stylesheet(value: &Option<String>) -> bool {
 
 /// Favicon spec usage in accordance with CEF implementation:
 /// only url of icon is required/used
-/// https://html.spec.whatwg.org/multipage/#rel-icon
+/// <https://html.spec.whatwg.org/multipage/#rel-icon>
 fn is_favicon(value: &Option<String>) -> bool {
     match *value {
         Some(ref value) => {
@@ -192,13 +191,6 @@ impl VirtualMethods for HTMLLinkElement {
                 if is_favicon(&rel) {
                     if let Some(ref href) = get_attr(self.upcast(), &local_name!("href")) {
                         self.handle_favicon_url(rel.as_ref().unwrap(), href, &Some(attr.value().to_string()));
-                    }
-                }
-            },
-            &local_name!("media") => {
-                if string_is_stylesheet(&rel) {
-                    if let Some(href) = self.upcast::<Element>().get_attribute(&ns!(), &local_name!("href")) {
-                        self.handle_stylesheet_url(&href.value());
                     }
                 }
             },
@@ -250,7 +242,7 @@ impl VirtualMethods for HTMLLinkElement {
 
 
 impl HTMLLinkElement {
-    /// https://html.spec.whatwg.org/multipage/#concept-link-obtain
+    /// <https://html.spec.whatwg.org/multipage/#concept-link-obtain>
     fn handle_stylesheet_url(&self, href: &str) {
         let document = document_from_node(self);
         if document.browsing_context().is_none() {
@@ -287,7 +279,7 @@ impl HTMLLinkElement {
         let mut css_parser = CssParser::new(&mut input);
         let doc_url = document.url();
         let context = CssParserContext::new_for_cssom(&doc_url, Some(CssRuleType::Media),
-                                                      PARSING_MODE_DEFAULT,
+                                                      ParsingMode::DEFAULT,
                                                       document.quirks_mode());
         let window = document.window();
         let media = parse_media_query_list(&context, &mut css_parser,
@@ -310,18 +302,12 @@ impl HTMLLinkElement {
         }, link_url, cors_setting, integrity_metadata.to_owned());
     }
 
-    fn handle_favicon_url(&self, rel: &str, href: &str, sizes: &Option<String>) {
+    fn handle_favicon_url(&self, _rel: &str, href: &str, _sizes: &Option<String>) {
         let document = document_from_node(self);
         match document.base_url().join(href) {
             Ok(url) => {
                 let event = ScriptMsg::NewFavicon(url.clone());
                 document.window().upcast::<GlobalScope>().script_to_constellation_chan().send(event).unwrap();
-
-                let mozbrowser_event = match *sizes {
-                    Some(ref sizes) => MozBrowserEvent::IconChange(rel.to_owned(), url.to_string(), sizes.to_owned()),
-                    None => MozBrowserEvent::IconChange(rel.to_owned(), url.to_string(), "".to_owned())
-                };
-                document.trigger_mozbrowser_event(mozbrowser_event);
             }
             Err(e) => debug!("Parsing url {} failed: {}", href, e)
         }

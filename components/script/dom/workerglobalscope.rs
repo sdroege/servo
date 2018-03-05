@@ -29,10 +29,10 @@ use ipc_channel::ipc::IpcSender;
 use js::jsapi::{HandleValue, JSAutoCompartment, JSContext, JSRuntime};
 use js::jsval::UndefinedValue;
 use js::panic::maybe_resume_unwind;
-use js::rust::Runtime;
+use msg::constellation_msg::PipelineId;
 use net_traits::{IpcSend, load_whole_resource};
-use net_traits::request::{CredentialsMode, Destination, RequestInit as NetRequestInit, Type as RequestType};
-use script_runtime::{CommonScriptMsg, ScriptChan, ScriptPort, get_reports};
+use net_traits::request::{CredentialsMode, Destination, RequestInit as NetRequestInit};
+use script_runtime::{CommonScriptMsg, ScriptChan, ScriptPort, get_reports, Runtime};
 use script_traits::{TimerEvent, TimerEventId};
 use script_traits::WorkerGlobalScopeInit;
 use servo_url::{MutableOrigin, ServoUrl};
@@ -73,24 +73,24 @@ pub struct WorkerGlobalScope {
 
     worker_id: WorkerId,
     worker_url: ServoUrl,
-    #[ignore_heap_size_of = "Arc"]
+    #[ignore_malloc_size_of = "Arc"]
     closing: Option<Arc<AtomicBool>>,
-    #[ignore_heap_size_of = "Defined in js"]
+    #[ignore_malloc_size_of = "Defined in js"]
     runtime: Runtime,
     location: MutNullableDom<WorkerLocation>,
     navigator: MutNullableDom<WorkerNavigator>,
 
-    #[ignore_heap_size_of = "Defined in ipc-channel"]
+    #[ignore_malloc_size_of = "Defined in ipc-channel"]
     /// Optional `IpcSender` for sending the `DevtoolScriptControlMsg`
     /// to the server from within the worker
     from_devtools_sender: Option<IpcSender<DevtoolScriptControlMsg>>,
 
-    #[ignore_heap_size_of = "Defined in std"]
+    #[ignore_malloc_size_of = "Defined in std"]
     /// This `Receiver` will be ignored later if the corresponding
     /// `IpcSender` doesn't exist
     from_devtools_receiver: Receiver<DevtoolScriptControlMsg>,
 
-    navigation_start_precise: f64,
+    navigation_start_precise: u64,
     performance: MutNullableDom<Performance>,
 }
 
@@ -124,7 +124,7 @@ impl WorkerGlobalScope {
             navigator: Default::default(),
             from_devtools_sender: init.from_devtools_sender,
             from_devtools_receiver,
-            navigation_start_precise: precise_time_ns() as f64,
+            navigation_start_precise: precise_time_ns(),
             performance: Default::default(),
         }
     }
@@ -166,6 +166,10 @@ impl WorkerGlobalScope {
             cancelled: self.closing.clone(),
         }
     }
+
+    pub fn pipeline_id(&self) -> PipelineId {
+        self.globalscope.pipeline_id()
+    }
 }
 
 impl WorkerGlobalScopeMethods for WorkerGlobalScope {
@@ -200,7 +204,6 @@ impl WorkerGlobalScopeMethods for WorkerGlobalScope {
             let global_scope = self.upcast::<GlobalScope>();
             let request = NetRequestInit {
                 url: url.clone(),
-                type_: RequestType::Script,
                 destination: Destination::Script,
                 credentials_mode: CredentialsMode::Include,
                 use_url_credentials: true,
@@ -365,15 +368,15 @@ impl WorkerGlobalScope {
     }
 
     pub fn file_reading_task_source(&self) -> FileReadingTaskSource {
-        FileReadingTaskSource(self.script_chan())
+        FileReadingTaskSource(self.script_chan(), self.pipeline_id())
     }
 
     pub fn networking_task_source(&self) -> NetworkingTaskSource {
-        NetworkingTaskSource(self.script_chan())
+        NetworkingTaskSource(self.script_chan(), self.pipeline_id())
     }
 
     pub fn performance_timeline_task_source(&self) -> PerformanceTimelineTaskSource {
-        PerformanceTimelineTaskSource(self.script_chan())
+        PerformanceTimelineTaskSource(self.script_chan(), self.pipeline_id())
     }
 
     pub fn new_script_pair(&self) -> (Box<ScriptChan + Send>, Box<ScriptPort + Send>) {
@@ -387,7 +390,7 @@ impl WorkerGlobalScope {
 
     pub fn process_event(&self, msg: CommonScriptMsg) {
         match msg {
-            CommonScriptMsg::Task(_, task) => {
+            CommonScriptMsg::Task(_, task, _) => {
                 task.run_box()
             },
             CommonScriptMsg::CollectReports(reports_chan) => {

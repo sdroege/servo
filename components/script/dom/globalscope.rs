@@ -47,6 +47,8 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::ffi::CString;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use task::TaskCanceller;
 use task_source::file_reading::FileReadingTaskSource;
 use task_source::networking::NetworkingTaskSource;
@@ -54,6 +56,17 @@ use task_source::performance_timeline::PerformanceTimelineTaskSource;
 use time::{Timespec, get_time};
 use timers::{IsInterval, OneshotTimerCallback, OneshotTimerHandle};
 use timers::{OneshotTimers, TimerCallback};
+
+#[derive(JSTraceable)]
+pub struct AutoCloseWorker(
+    Arc<AtomicBool>,
+);
+
+impl Drop for AutoCloseWorker {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
 
 #[dom_struct]
 pub struct GlobalScope {
@@ -72,25 +85,25 @@ pub struct GlobalScope {
     console_timers: DomRefCell<HashMap<DOMString, u64>>,
 
     /// For providing instructions to an optional devtools server.
-    #[ignore_heap_size_of = "channels are hard"]
+    #[ignore_malloc_size_of = "channels are hard"]
     devtools_chan: Option<IpcSender<ScriptToDevtoolsControlMsg>>,
 
     /// For sending messages to the memory profiler.
-    #[ignore_heap_size_of = "channels are hard"]
+    #[ignore_malloc_size_of = "channels are hard"]
     mem_profiler_chan: mem::ProfilerChan,
 
     /// For sending messages to the time profiler.
-    #[ignore_heap_size_of = "channels are hard"]
+    #[ignore_malloc_size_of = "channels are hard"]
     time_profiler_chan: time::ProfilerChan,
 
     /// A handle for communicating messages to the constellation thread.
-    #[ignore_heap_size_of = "channels are hard"]
+    #[ignore_malloc_size_of = "channels are hard"]
     script_to_constellation_chan: ScriptToConstellationChan,
 
-    #[ignore_heap_size_of = "channels are hard"]
+    #[ignore_malloc_size_of = "channels are hard"]
     scheduler_chan: IpcSender<TimerSchedulerMsg>,
 
-    /// https://html.spec.whatwg.org/multipage/#in-error-reporting-mode
+    /// <https://html.spec.whatwg.org/multipage/#in-error-reporting-mode>
     in_error_reporting_mode: Cell<bool>,
 
     /// Associated resource threads for use by DOM objects like XMLHttpRequest,
@@ -107,9 +120,13 @@ pub struct GlobalScope {
     /// It is refcounted because windows in the same script thread share the
     /// same microtask queue.
     ///
-    /// https://html.spec.whatwg.org/multipage/#microtask-queue
-    #[ignore_heap_size_of = "Rc<T> is hard"]
+    /// <https://html.spec.whatwg.org/multipage/#microtask-queue>
+    #[ignore_malloc_size_of = "Rc<T> is hard"]
     microtask_queue: Rc<MicrotaskQueue>,
+
+    /// Vector storing closing references of all workers
+    #[ignore_malloc_size_of = "Arc"]
+    list_auto_close_worker: DomRefCell<Vec<AutoCloseWorker>>,
 }
 
 impl GlobalScope {
@@ -142,7 +159,12 @@ impl GlobalScope {
             timers: OneshotTimers::new(timer_event_chan, scheduler_chan),
             origin,
             microtask_queue,
+            list_auto_close_worker: Default::default(),
         }
+    }
+
+    pub fn track_worker(&self, closing_worker: Arc<AtomicBool>) {
+       self.list_auto_close_worker.borrow_mut().push(AutoCloseWorker(closing_worker));
     }
 
     /// Returns the global scope of the realm that the given DOM object's reflector
@@ -303,7 +325,7 @@ impl GlobalScope {
         self.downcast::<Window>().expect("expected a Window scope")
     }
 
-    /// https://html.spec.whatwg.org/multipage/#report-the-error
+    /// <https://html.spec.whatwg.org/multipage/#report-the-error>
     pub fn report_an_error(&self, error_info: ErrorInfo, value: HandleValue) {
         // Step 1.
         if self.in_error_reporting_mode.get() {
@@ -610,6 +632,6 @@ fn timestamp_in_ms(time: Timespec) -> u64 {
 unsafe fn global_scope_from_global(global: *mut JSObject) -> DomRoot<GlobalScope> {
     assert!(!global.is_null());
     let clasp = get_object_class(global);
-    assert!(((*clasp).flags & (JSCLASS_IS_DOMJSCLASS | JSCLASS_IS_GLOBAL)) != 0);
+    assert_ne!(((*clasp).flags & (JSCLASS_IS_DOMJSCLASS | JSCLASS_IS_GLOBAL)), 0);
     root_from_object(global).unwrap()
 }

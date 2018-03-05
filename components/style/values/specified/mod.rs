@@ -6,51 +6,78 @@
 //!
 //! TODO(emilio): Enhance docs.
 
-use Namespace;
+use Prefix;
 use context::QuirksMode;
-use cssparser::{Parser, Token, serialize_identifier, BasicParseError};
+use cssparser::{Parser, Token, serialize_identifier};
+use num_traits::One;
 use parser::{ParserContext, Parse};
 use self::url::SpecifiedUrl;
-use std::ascii::AsciiExt;
+#[allow(unused_imports)] use std::ascii::AsciiExt;
 use std::f32;
-use std::fmt;
-use style_traits::{ToCss, ParseError, StyleParseError};
+use std::fmt::{self, Write};
+use style_traits::{CssWriter, ParseError, StyleParseErrorKind, ToCss};
 use style_traits::values::specified::AllowedNumericType;
 use super::{Auto, CSSFloat, CSSInteger, Either, None_};
 use super::computed::{Context, ToComputedValue};
 use super::generics::{GreaterThanOrEqualToOne, NonNegative};
 use super::generics::grid::{GridLine as GenericGridLine, TrackBreadth as GenericTrackBreadth};
 use super::generics::grid::{TrackSize as GenericTrackSize, TrackList as GenericTrackList};
+use values::serialize_atom_identifier;
 use values::specified::calc::CalcNode;
 
 pub use properties::animated_properties::TransitionProperty;
 pub use self::angle::Angle;
 #[cfg(feature = "gecko")]
-pub use self::align::{AlignItems, AlignJustifyContent, AlignJustifySelf, JustifyItems};
-pub use self::background::BackgroundSize;
+pub use self::align::{AlignContent, JustifyContent, AlignItems, ContentDistribution, SelfAlignment, JustifyItems};
+#[cfg(feature = "gecko")]
+pub use self::align::{AlignSelf, JustifySelf};
+pub use self::background::{BackgroundRepeat, BackgroundSize};
 pub use self::border::{BorderCornerRadius, BorderImageSlice, BorderImageWidth};
-pub use self::border::{BorderImageSideWidth, BorderRadius, BorderSideWidth, BorderSpacing};
-pub use self::box_::VerticalAlign;
+pub use self::border::{BorderImageRepeat, BorderImageSideWidth, BorderRadius, BorderSideWidth, BorderSpacing};
+pub use self::column::ColumnCount;
+pub use self::font::{FontSize, FontSizeAdjust, FontSynthesis, FontWeight, FontVariantAlternates};
+pub use self::font::{FontFamily, FontLanguageOverride, FontVariationSettings, FontVariantEastAsian};
+pub use self::font::{FontVariantLigatures, FontVariantNumeric, FontFeatureSettings};
+pub use self::font::{MozScriptLevel, MozScriptMinSize, MozScriptSizeMultiplier, XTextZoom, XLang};
+pub use self::box_::{AnimationIterationCount, AnimationName, Contain, Display};
+pub use self::box_::{OverflowClipBox, OverscrollBehavior, Perspective};
+pub use self::box_::{ScrollSnapType, TouchAction, VerticalAlign, WillChange};
 pub use self::color::{Color, ColorPropertyValue, RGBAColor};
+pub use self::counters::{Content, ContentItem, CounterIncrement, CounterReset};
 pub use self::effects::{BoxShadow, Filter, SimpleShadow};
 pub use self::flex::FlexBasis;
 #[cfg(feature = "gecko")]
 pub use self::gecko::ScrollSnapPoint;
 pub use self::image::{ColorStop, EndingShape as GradientEndingShape, Gradient};
 pub use self::image::{GradientItem, GradientKind, Image, ImageLayer, MozImageRect};
+pub use self::inherited_box::ImageOrientation;
 pub use self::length::{AbsoluteLength, CalcLengthOrPercentage, CharacterWidth};
-pub use self::length::{FontRelativeLength, Length, LengthOrNone, LengthOrNumber};
+pub use self::length::{FontRelativeLength, Length, LengthOrNumber};
 pub use self::length::{LengthOrPercentage, LengthOrPercentageOrAuto};
 pub use self::length::{LengthOrPercentageOrNone, MaxLength, MozLength};
 pub use self::length::{NoCalcLength, ViewportPercentageLength};
 pub use self::length::NonNegativeLengthOrPercentage;
+pub use self::list::{ListStyleImage, Quotes};
+#[cfg(feature = "gecko")]
+pub use self::list::ListStyleType;
+pub use self::outline::OutlineStyle;
 pub use self::rect::LengthOrNumberRect;
 pub use self::percentage::Percentage;
-pub use self::position::{Position, PositionComponent};
-pub use self::svg::{SVGLength, SVGOpacity, SVGPaint, SVGPaintKind, SVGStrokeDashArray, SVGWidth};
-pub use self::text::{InitialLetter, LetterSpacing, LineHeight, WordSpacing};
+pub use self::pointing::{CaretColor, Cursor};
+#[cfg(feature = "gecko")]
+pub use self::pointing::CursorImage;
+pub use self::position::{GridAutoFlow, GridTemplateAreas, Position};
+pub use self::position::{PositionComponent, ZIndex};
+pub use self::svg::{SVGLength, SVGOpacity, SVGPaint, SVGPaintKind};
+pub use self::svg::{SVGPaintOrder, SVGStrokeDashArray, SVGWidth};
+pub use self::svg::MozContextProperties;
+pub use self::table::XSpan;
+pub use self::text::{InitialLetter, LetterSpacing, LineHeight, MozTabSize, TextAlign};
+pub use self::text::{TextAlignKeyword, TextDecorationLine, TextOverflow, WordSpacing};
 pub use self::time::Time;
-pub use self::transform::{TimingFunction, TransformOrigin};
+pub use self::transform::{Rotate, Scale, TimingFunction, Transform};
+pub use self::transform::{TransformOrigin, TransformStyle, Translate};
+pub use self::ui::MozForceBrokenImageIcon;
 pub use super::generics::grid::GridTemplateComponent as GenericGridTemplateComponent;
 
 #[cfg(feature = "gecko")]
@@ -63,6 +90,8 @@ pub mod border;
 pub mod box_;
 pub mod calc;
 pub mod color;
+pub mod column;
+pub mod counters;
 pub mod effects;
 pub mod flex;
 pub mod font;
@@ -70,14 +99,21 @@ pub mod font;
 pub mod gecko;
 pub mod grid;
 pub mod image;
+pub mod inherited_box;
 pub mod length;
+pub mod list;
+pub mod outline;
 pub mod percentage;
+pub mod pointing;
 pub mod position;
 pub mod rect;
+pub mod source_size_list;
 pub mod svg;
+pub mod table;
 pub mod text;
 pub mod time;
 pub mod transform;
+pub mod ui;
 
 /// Common handling for the specified value CSS url() values.
 pub mod url {
@@ -100,35 +136,13 @@ impl Parse for SpecifiedUrl {
 impl Eq for SpecifiedUrl {}
 }
 
-/// Parse an `<integer>` value, handling `calc()` correctly.
-pub fn parse_integer<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>)
-                             -> Result<Integer, ParseError<'i>> {
-    // FIXME: remove early returns when lifetimes are non-lexical
-    match *input.next()? {
-        Token::Number { int_value: Some(v), .. } => return Ok(Integer::new(v)),
-        Token::Function(ref name) if name.eq_ignore_ascii_case("calc") => {}
-        ref t => return Err(BasicParseError::UnexpectedToken(t.clone()).into())
-    }
-
-    let result = input.parse_nested_block(|i| {
-        CalcNode::parse_integer(context, i)
-    })?;
-
-    Ok(Integer::from_calc(result))
-}
-
-/// Parse a `<number>` value, handling `calc()` correctly, and without length
-/// limitations.
-pub fn parse_number<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>)
-                            -> Result<Number, ParseError<'i>> {
-    parse_number_with_clamping_mode(context, input, AllowedNumericType::All)
-}
-
 /// Parse a `<number>` value, with a given clamping mode.
-pub fn parse_number_with_clamping_mode<'i, 't>(context: &ParserContext,
-                                               input: &mut Parser<'i, 't>,
-                                               clamping_mode: AllowedNumericType)
-                                               -> Result<Number, ParseError<'i>> {
+fn parse_number_with_clamping_mode<'i, 't>(
+    context: &ParserContext,
+    input: &mut Parser<'i, 't>,
+    clamping_mode: AllowedNumericType,
+) -> Result<Number, ParseError<'i>> {
+    let location = input.current_source_location();
     // FIXME: remove early returns when lifetimes are non-lexical
     match *input.next()? {
         Token::Number { value, .. } if clamping_mode.is_ok(context.parsing_mode, value) => {
@@ -138,7 +152,7 @@ pub fn parse_number_with_clamping_mode<'i, 't>(context: &ParserContext,
             })
         }
         Token::Function(ref name) if name.eq_ignore_ascii_case("calc") => {}
-        ref t => return Err(BasicParseError::UnexpectedToken(t.clone()).into())
+        ref t => return Err(location.new_unexpected_token_error(t.clone()))
     }
 
     let result = input.parse_nested_block(|i| {
@@ -153,31 +167,36 @@ pub fn parse_number_with_clamping_mode<'i, 't>(context: &ParserContext,
 
 // The integer values here correspond to the border conflict resolution rules in CSS 2.1 §
 // 17.6.2.1. Higher values override lower values.
-define_numbered_css_keyword_enum! { BorderStyle:
-    "none" => none = -1,
-    "solid" => solid = 6,
-    "double" => double = 7,
-    "dotted" => dotted = 4,
-    "dashed" => dashed = 5,
-    "hidden" => hidden = -2,
-    "groove" => groove = 1,
-    "ridge" => ridge = 3,
-    "inset" => inset = 0,
-    "outset" => outset = 2,
+//
+// FIXME(emilio): Should move to border.rs
+#[allow(missing_docs)]
+#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
+#[derive(Clone, Copy, Debug, Eq, MallocSizeOf, Ord, Parse, PartialEq)]
+#[derive(PartialOrd, ToCss)]
+pub enum BorderStyle {
+    None = -1,
+    Solid = 6,
+    Double = 7,
+    Dotted = 4,
+    Dashed = 5,
+    Hidden = -2,
+    Groove = 1,
+    Ridge = 3,
+    Inset = 0,
+    Outset = 2,
 }
-
 
 impl BorderStyle {
     /// Whether this border style is either none or hidden.
     pub fn none_or_hidden(&self) -> bool {
-        matches!(*self, BorderStyle::none | BorderStyle::hidden)
+        matches!(*self, BorderStyle::None | BorderStyle::Hidden)
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[allow(missing_docs)]
+/// A CSS `<number>` specified value.
+///
+/// https://drafts.csswg.org/css-values-3/#number-value
+#[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq, PartialOrd)]
 pub struct Number {
     /// The numeric value itself.
     value: CSSFloat,
@@ -189,7 +208,7 @@ pub struct Number {
 
 impl Parse for Number {
     fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>) -> Result<Self, ParseError<'i>> {
-        parse_number(context, input)
+        parse_number_with_clamping_mode(context, input, AllowedNumericType::All)
     }
 }
 
@@ -245,8 +264,9 @@ impl ToComputedValue for Number {
 }
 
 impl ToCss for Number {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result
-        where W: fmt::Write,
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
     {
         if self.calc_clamping_mode.is_some() {
             dest.write_str("calc(")?;
@@ -256,6 +276,20 @@ impl ToCss for Number {
             dest.write_str(")")?;
         }
         Ok(())
+    }
+}
+
+impl From<Number> for f32 {
+    #[inline]
+    fn from(n: Number) -> Self {
+        n.get()
+    }
+}
+
+impl From<Number> for f64 {
+    #[inline]
+    fn from(n: Number) -> Self {
+        n.get() as f64
     }
 }
 
@@ -292,9 +326,7 @@ impl Parse for GreaterThanOrEqualToOneNumber {
 ///
 /// FIXME(emilio): Should probably use Either.
 #[allow(missing_docs)]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Clone, Copy, Debug, PartialEq, ToCss)]
+#[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq, ToCss)]
 pub enum NumberOrPercentage {
     Percentage(Percentage),
     Number(Number),
@@ -328,15 +360,13 @@ impl Parse for NumberOrPercentage {
 }
 
 #[allow(missing_docs)]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, ToCss)]
+#[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq, PartialOrd, ToCss)]
 pub struct Opacity(Number);
 
 
 impl Parse for Opacity {
     fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>) -> Result<Self, ParseError<'i>> {
-        parse_number(context, input).map(Opacity)
+        Number::parse(context, input).map(Opacity)
     }
 }
 
@@ -363,13 +393,27 @@ impl ToComputedValue for Opacity {
 
 /// An specified `<integer>`, optionally coming from a `calc()` expression.
 ///
-/// https://drafts.csswg.org/css-values/#integers
-#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+/// <https://drafts.csswg.org/css-values/#integers>
+#[derive(Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq, PartialOrd)]
 pub struct Integer {
     value: CSSInteger,
     was_calc: bool,
+}
+
+impl One for Integer {
+    #[inline]
+    fn one() -> Self {
+        Self::new(1)
+    }
+}
+
+// This is not great, because it loses calc-ness, but it's necessary for One.
+impl ::std::ops::Mul<Integer> for Integer {
+    type Output = Self;
+
+    fn mul(self, other: Self) -> Self {
+        Self::new(self.value * other.value)
+    }
 }
 
 impl Integer {
@@ -397,7 +441,20 @@ impl Integer {
 
 impl Parse for Integer {
     fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>) -> Result<Self, ParseError<'i>> {
-        parse_integer(context, input)
+        let location = input.current_source_location();
+
+        // FIXME: remove early returns when lifetimes are non-lexical
+        match *input.next()? {
+            Token::Number { int_value: Some(v), .. } => return Ok(Integer::new(v)),
+            Token::Function(ref name) if name.eq_ignore_ascii_case("calc") => {}
+            ref t => return Err(location.new_unexpected_token_error(t.clone()))
+        }
+
+        let result = input.parse_nested_block(|i| {
+            CalcNode::parse_integer(context, i)
+        })?;
+
+        Ok(Integer::from_calc(result))
     }
 }
 
@@ -406,16 +463,16 @@ impl Integer {
     pub fn parse_with_minimum<'i, 't>(
         context: &ParserContext,
         input: &mut Parser<'i, 't>,
-        min: i32
+        min: i32,
     ) -> Result<Integer, ParseError<'i>> {
-        match parse_integer(context, input) {
+        match Integer::parse(context, input) {
             // FIXME(emilio): The spec asks us to avoid rejecting it at parse
             // time except until computed value time.
             //
             // It's not totally clear it's worth it though, and no other browser
             // does this.
             Ok(value) if value.value() >= min => Ok(value),
-            Ok(_value) => Err(StyleParseError::UnspecifiedError.into()),
+            Ok(_value) => Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError)),
             Err(e) => Err(e),
         }
     }
@@ -450,8 +507,9 @@ impl ToComputedValue for Integer {
 }
 
 impl ToCss for Integer {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result
-        where W: fmt::Write,
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
     {
         if self.was_calc {
             dest.write_str("calc(")?;
@@ -464,21 +522,6 @@ impl ToCss for Integer {
     }
 }
 
-/// <integer> | auto
-pub type IntegerOrAuto = Either<Integer, Auto>;
-
-impl IntegerOrAuto {
-    #[allow(missing_docs)]
-    pub fn parse_positive<'i, 't>(context: &ParserContext,
-                                  input: &mut Parser<'i, 't>)
-                                  -> Result<IntegerOrAuto, ParseError<'i>> {
-        match IntegerOrAuto::parse(context, input) {
-            Ok(Either::First(integer)) if integer.value() <= 0 => Err(StyleParseError::UnspecifiedError.into()),
-            result => result,
-        }
-    }
-}
-
 /// A wrapper of Integer, with value >= 1.
 pub type PositiveInteger = GreaterThanOrEqualToOne<Integer>;
 
@@ -488,9 +531,6 @@ impl Parse for PositiveInteger {
         Integer::parse_positive(context, input).map(GreaterThanOrEqualToOne::<Integer>)
     }
 }
-
-/// PositiveInteger | auto
-pub type PositiveIntegerOrAuto = Either<PositiveInteger, Auto>;
 
 #[allow(missing_docs)]
 pub type UrlOrNone = Either<SpecifiedUrl, None_>;
@@ -511,15 +551,7 @@ pub type GridLine = GenericGridLine<Integer>;
 /// `<grid-template-rows> | <grid-template-columns>`
 pub type GridTemplateComponent = GenericGridTemplateComponent<LengthOrPercentage, Integer>;
 
-/// <length> | <percentage> | <number>
-pub type LengthOrPercentageOrNumber = Either<Number, LengthOrPercentage>;
-
-/// NonNegativeLengthOrPercentage | NonNegativeNumber
-pub type NonNegativeLengthOrPercentageOrNumber = Either<NonNegativeNumber, NonNegativeLengthOrPercentage>;
-
-#[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[derive(Clone, Debug, MallocSizeOf, PartialEq)]
 /// rect(<top>, <left>, <bottom>, <right>) used by clip and image-region
 pub struct ClipRect {
     /// <top> (<length> | <auto>)
@@ -534,7 +566,10 @@ pub struct ClipRect {
 
 
 impl ToCss for ClipRect {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         dest.write_str("rect(")?;
 
         if let Some(ref top) = self.top {
@@ -658,9 +693,6 @@ impl ClipRectOrAuto {
     }
 }
 
-/// <color> | auto
-pub type ColorOrAuto = Either<Color, Auto>;
-
 /// Whether quirks are allowed in this context.
 #[derive(Clone, Copy, PartialEq)]
 pub enum AllowQuirks {
@@ -689,12 +721,10 @@ pub type NamespaceId = ();
 /// An attr(...) rule
 ///
 /// `[namespace? `|`]? ident`
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Clone, Debug, Eq, PartialEq, ToComputedValue)]
+#[derive(Clone, Debug, Eq, MallocSizeOf, PartialEq, ToComputedValue)]
 pub struct Attr {
-    /// Optional namespace
-    pub namespace: Option<(Namespace, NamespaceId)>,
+    /// Optional namespace prefix, with the actual namespace id.
+    pub namespace: Option<(Prefix, NamespaceId)>,
     /// Attribute name
     pub attribute: String,
 }
@@ -706,53 +736,40 @@ impl Parse for Attr {
     }
 }
 
-#[cfg(feature = "gecko")]
-/// Get the namespace id from the namespace map
-fn get_id_for_namespace(namespace: &Namespace, context: &ParserContext) -> Result<NamespaceId, ()> {
-    let namespaces_map = match context.namespaces {
-        Some(map) => map,
-        None => {
-            // If we don't have a namespace map (e.g. in inline styles)
-            // we can't parse namespaces
-            return Err(());
-        }
-    };
-
-    match namespaces_map.prefixes.get(&namespace.0) {
-        Some(entry) => Ok(entry.1),
-        None => Err(()),
-    }
-}
-
-#[cfg(feature = "servo")]
-/// Get the namespace id from the namespace map
-fn get_id_for_namespace(_: &Namespace, _: &ParserContext) -> Result<NamespaceId, ()> {
-    Ok(())
+/// Get the Namespace id from the namespace map.
+fn get_id_for_namespace(prefix: &Prefix, context: &ParserContext) -> Option<NamespaceId> {
+    Some(context.namespaces.as_ref()?.prefixes.get(prefix)?.1)
 }
 
 impl Attr {
     /// Parse contents of attr() assuming we have already parsed `attr` and are
     /// within a parse_nested_block()
-    pub fn parse_function<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>)
-                                  -> Result<Attr, ParseError<'i>> {
+    pub fn parse_function<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Attr, ParseError<'i>> {
         // Syntax is `[namespace? `|`]? ident`
         // no spaces allowed
         let first = input.try(|i| i.expect_ident_cloned()).ok();
         if let Ok(token) = input.try(|i| i.next_including_whitespace().map(|t| t.clone())) {
             match token {
                 Token::Delim('|') => {
+                    let location = input.current_source_location();
                     // must be followed by an ident
                     let second_token = match *input.next_including_whitespace()? {
                         Token::Ident(ref second) => second,
-                        ref t => return Err(BasicParseError::UnexpectedToken(t.clone()).into()),
+                        ref t => return Err(location.new_unexpected_token_error(t.clone())),
                     };
 
                     let ns_with_id = if let Some(ns) = first {
-                        let ns = Namespace::from(ns.as_ref());
-                        let id: Result<_, ParseError> =
-                            get_id_for_namespace(&ns, context)
-                            .map_err(|()| StyleParseError::UnspecifiedError.into());
-                        Some((ns, id?))
+                        let ns = Prefix::from(ns.as_ref());
+                        let id = match get_id_for_namespace(&ns, context) {
+                            Some(id) => id,
+                            None => return Err(location.new_custom_error(
+                                StyleParseErrorKind::UnspecifiedError
+                            )),
+                        };
+                        Some((ns, id))
                     } else {
                         None
                     };
@@ -763,8 +780,8 @@ impl Attr {
                 }
                 // In the case of attr(foobar    ) we don't want to error out
                 // because of the trailing whitespace
-                Token::WhiteSpace(_) => (),
-                ref t => return Err(BasicParseError::UnexpectedToken(t.clone()).into()),
+                Token::WhiteSpace(..) => {},
+                ref t => return Err(input.new_unexpected_token_error(t.clone())),
             }
         }
 
@@ -774,16 +791,19 @@ impl Attr {
                 attribute: first.as_ref().to_owned(),
             })
         } else {
-            Err(StyleParseError::UnspecifiedError.into())
+            Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
         }
     }
 }
 
 impl ToCss for Attr {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         dest.write_str("attr(")?;
-        if let Some(ref ns) = self.namespace {
-            serialize_identifier(&ns.0.to_string(), dest)?;
+        if let Some((ref prefix, _id)) = self.namespace {
+            serialize_atom_identifier(prefix, dest)?;
             dest.write_str("|")?;
         }
         serialize_identifier(&self.attribute, dest)?;

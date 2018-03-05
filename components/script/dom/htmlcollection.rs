@@ -26,7 +26,7 @@ pub trait CollectionFilter : JSTraceable {
 // An optional u32, using maxint to represent None.
 // It would be nicer just to use Option<u32> for this, but that would produce word
 // alignment issues since Option<u32> uses 33 bits.
-#[derive(Clone, Copy, HeapSizeOf, JSTraceable)]
+#[derive(Clone, Copy, JSTraceable, MallocSizeOf)]
 struct OptionU32 {
     bits: u32,
 }
@@ -41,7 +41,7 @@ impl OptionU32 {
     }
 
     fn some(bits: u32) -> OptionU32 {
-        assert!(bits != u32::max_value());
+        assert_ne!(bits, u32::max_value());
         OptionU32 { bits: bits }
     }
 
@@ -54,7 +54,7 @@ impl OptionU32 {
 pub struct HTMLCollection {
     reflector_: Reflector,
     root: Dom<Node>,
-    #[ignore_heap_size_of = "Contains a trait object; can't measure due to #6870"]
+    #[ignore_malloc_size_of = "Contains a trait object; can't measure due to #6870"]
     filter: Box<CollectionFilter + 'static>,
     // We cache the version of the root node and all its decendents,
     // the length of the collection, and a cursor into the collection.
@@ -80,9 +80,22 @@ impl HTMLCollection {
         }
     }
 
+    /// Returns a collection which is always empty.
+    pub fn always_empty(window: &Window, root: &Node) -> DomRoot<Self> {
+        #[derive(JSTraceable)]
+        struct NoFilter;
+        impl CollectionFilter for NoFilter {
+            fn filter<'a>(&self, _: &'a Element, _: &'a Node) -> bool {
+                false
+            }
+        }
+
+        Self::new(window, root, Box::new(NoFilter))
+    }
+
     #[allow(unrooted_must_root)]
     pub fn new(window: &Window, root: &Node, filter: Box<CollectionFilter + 'static>) -> DomRoot<HTMLCollection> {
-        reflect_dom_object(box HTMLCollection::new_inherited(root, filter),
+        reflect_dom_object(Box::new(HTMLCollection::new_inherited(root, filter)),
                            window, HTMLCollectionBinding::Wrap)
     }
 
@@ -119,17 +132,17 @@ impl HTMLCollection {
                              -> DomRoot<HTMLCollection> {
         // case 1
         if qualified_name == local_name!("*") {
-            #[derive(HeapSizeOf, JSTraceable)]
+            #[derive(JSTraceable, MallocSizeOf)]
             struct AllFilter;
             impl CollectionFilter for AllFilter {
                 fn filter(&self, _elem: &Element, _root: &Node) -> bool {
                     true
                 }
             }
-            return HTMLCollection::create(window, root, box AllFilter);
+            return HTMLCollection::create(window, root, Box::new(AllFilter));
         }
 
-        #[derive(HeapSizeOf, JSTraceable)]
+        #[derive(JSTraceable, MallocSizeOf)]
         struct HtmlDocumentFilter {
             qualified_name: LocalName,
             ascii_lower_qualified_name: LocalName,
@@ -148,7 +161,7 @@ impl HTMLCollection {
             ascii_lower_qualified_name: qualified_name.to_ascii_lowercase(),
             qualified_name: qualified_name,
         };
-        HTMLCollection::create(window, root, box filter)
+        HTMLCollection::create(window, root, Box::new(filter))
     }
 
     fn match_element(elem: &Element, qualified_name: &LocalName) -> bool {
@@ -169,7 +182,7 @@ impl HTMLCollection {
     }
 
     pub fn by_qual_tag_name(window: &Window, root: &Node, qname: QualName) -> DomRoot<HTMLCollection> {
-        #[derive(HeapSizeOf, JSTraceable)]
+        #[derive(JSTraceable, MallocSizeOf)]
         struct TagNameNSFilter {
             qname: QualName
         }
@@ -182,7 +195,7 @@ impl HTMLCollection {
         let filter = TagNameNSFilter {
             qname: qname
         };
-        HTMLCollection::create(window, root, box filter)
+        HTMLCollection::create(window, root, Box::new(filter))
     }
 
     pub fn by_class_name(window: &Window, root: &Node, classes: DOMString)
@@ -193,7 +206,7 @@ impl HTMLCollection {
 
     pub fn by_atomic_class_name(window: &Window, root: &Node, classes: Vec<Atom>)
                          -> DomRoot<HTMLCollection> {
-        #[derive(HeapSizeOf, JSTraceable)]
+        #[derive(JSTraceable, MallocSizeOf)]
         struct ClassNameFilter {
             classes: Vec<Atom>
         }
@@ -208,18 +221,18 @@ impl HTMLCollection {
         let filter = ClassNameFilter {
             classes: classes
         };
-        HTMLCollection::create(window, root, box filter)
+        HTMLCollection::create(window, root, Box::new(filter))
     }
 
     pub fn children(window: &Window, root: &Node) -> DomRoot<HTMLCollection> {
-        #[derive(HeapSizeOf, JSTraceable)]
+        #[derive(JSTraceable, MallocSizeOf)]
         struct ElementChildFilter;
         impl CollectionFilter for ElementChildFilter {
             fn filter(&self, elem: &Element, root: &Node) -> bool {
                 root.is_parent_of(elem.upcast())
             }
         }
-        HTMLCollection::create(window, root, box ElementChildFilter)
+        HTMLCollection::create(window, root, Box::new(ElementChildFilter))
     }
 
     pub fn elements_iter_after<'a>(&'a self, after: &'a Node) -> impl Iterator<Item=DomRoot<Element>> + 'a {

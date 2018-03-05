@@ -6,18 +6,18 @@
 
 use compositor_thread::EventLoopWaker;
 use euclid::{Point2D, Size2D};
-use euclid::{ScaleFactor, TypedPoint2D, TypedSize2D};
+use euclid::{TypedScale, TypedPoint2D, TypedSize2D};
 use gleam::gl;
 use ipc_channel::ipc::IpcSender;
 use msg::constellation_msg::{Key, KeyModifiers, KeyState, TopLevelBrowsingContextId, TraversalDirection};
 use net_traits::net_error_list::NetError;
-use script_traits::{LoadData, MouseButton, TouchEventType, TouchId, TouchpadPressurePhase};
+use script_traits::{LoadData, MouseButton, TouchEventType, TouchId};
 use servo_geometry::DeviceIndependentPixel;
 use servo_url::ServoUrl;
 use std::fmt::{Debug, Error, Formatter};
 use std::rc::Rc;
 use style_traits::DevicePixel;
-use style_traits::cursor::Cursor;
+use style_traits::cursor::CursorKind;
 use webrender_api::{DeviceUintSize, DeviceUintRect, ScrollLocation};
 
 #[derive(Clone)]
@@ -49,9 +49,7 @@ pub enum WindowEvent {
     /// message, the window must make the same GL context as in `PrepareRenderingEvent` current.
     Refresh,
     /// Sent when the window is resized.
-    Resize(DeviceUintSize),
-    /// Touchpad Pressure
-    TouchpadPressure(TypedPoint2D<f32, DevicePixel>, f32, TouchpadPressurePhase),
+    Resize,
     /// Sent when a new URL is to be loaded.
     LoadUrl(TopLevelBrowsingContextId, ServoUrl),
     /// Sent when a mouse hit test is to be performed.
@@ -93,8 +91,7 @@ impl Debug for WindowEvent {
         match *self {
             WindowEvent::Idle => write!(f, "Idle"),
             WindowEvent::Refresh => write!(f, "Refresh"),
-            WindowEvent::Resize(..) => write!(f, "Resize"),
-            WindowEvent::TouchpadPressure(..) => write!(f, "TouchpadPressure"),
+            WindowEvent::Resize => write!(f, "Resize"),
             WindowEvent::KeyEvent(..) => write!(f, "Key"),
             WindowEvent::LoadUrl(..) => write!(f, "LoadUrl"),
             WindowEvent::MouseWindowEventClass(..) => write!(f, "Mouse"),
@@ -133,6 +130,10 @@ pub trait WindowMethods {
 
     /// Return the size of the window with head and borders and position of the window values
     fn client_window(&self, ctx: TopLevelBrowsingContextId) -> (Size2D<u32>, Point2D<i32>);
+    /// Return the size of the screen (pixel)
+    fn screen_size(&self, ctx: TopLevelBrowsingContextId) -> Size2D<u32>;
+    /// Return the available size of the screen (pixel)
+    fn screen_avail_size(&self, ctx: TopLevelBrowsingContextId) -> Size2D<u32>;
     /// Set the size inside of borders and head
     fn set_inner_size(&self, ctx: TopLevelBrowsingContextId, size: Size2D<u32>);
     /// Set the window position
@@ -158,7 +159,7 @@ pub trait WindowMethods {
     fn history_changed(&self, ctx: TopLevelBrowsingContextId, Vec<LoadData>, usize);
 
     /// Returns the scale factor of the system (device pixels / device independent pixels).
-    fn hidpi_factor(&self) -> ScaleFactor<f32, DeviceIndependentPixel, DevicePixel>;
+    fn hidpi_factor(&self) -> TypedScale<f32, DeviceIndependentPixel, DevicePixel>;
 
     /// Returns a thread-safe object to wake up the window's event loop.
     fn create_event_loop_waker(&self) -> Box<EventLoopWaker>;
@@ -169,7 +170,7 @@ pub trait WindowMethods {
     fn prepare_for_composite(&self, width: usize, height: usize) -> bool;
 
     /// Sets the cursor to be used in the window.
-    fn set_cursor(&self, cursor: Cursor);
+    fn set_cursor(&self, cursor: CursorKind);
 
     /// Process a key event.
     fn handle_key(&self, ctx: Option<TopLevelBrowsingContextId>, ch: Option<char>, key: Key, mods: KeyModifiers);
@@ -188,4 +189,7 @@ pub trait WindowMethods {
     /// will want to avoid blocking on UI events, and just
     /// run the event loop at the vsync interval.
     fn set_animation_state(&self, _state: AnimationState) {}
+
+    /// Called when a pipeline panics.
+    fn handle_panic(&self, browser_id: TopLevelBrowsingContextId, reason: String, backtrace: Option<String>);
 }

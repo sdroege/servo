@@ -4,7 +4,6 @@
 
 // check-tidy: no specs after this line
 
-use core::nonzero::NonZero;
 use dom::bindings::callback::ExceptionHandling;
 use dom::bindings::codegen::Bindings::EventListenerBinding::EventListener;
 use dom::bindings::codegen::Bindings::FunctionBinding::Function;
@@ -38,10 +37,12 @@ use dom_struct::dom_struct;
 use js::jsapi::{HandleObject, HandleValue, Heap, JSContext, JSObject};
 use js::jsapi::{JS_NewPlainObject, JS_NewUint8ClampedArray};
 use js::jsval::{JSVal, NullValue};
+use js::rust::CustomAutoRooterGuard;
 use script_traits::MsDuration;
 use servo_config::prefs::PREFS;
 use std::borrow::ToOwned;
 use std::ptr;
+use std::ptr::NonNull;
 use std::rc::Rc;
 use timers::OneshotTimerCallback;
 
@@ -60,7 +61,7 @@ impl TestBinding {
     }
 
     pub fn new(global: &GlobalScope) -> DomRoot<TestBinding> {
-        reflect_dom_object(box TestBinding::new_inherited(),
+        reflect_dom_object(Box::new(TestBinding::new_inherited()),
                            global, TestBindingBinding::Wrap)
     }
 
@@ -151,20 +152,18 @@ impl TestBindingMethods for TestBinding {
     }
     fn SetUnion9Attribute(&self, _: ByteStringOrLong) {}
     #[allow(unsafe_code)]
-    unsafe fn ArrayAttribute(&self, cx: *mut JSContext) -> NonZero<*mut JSObject> {
+    unsafe fn ArrayAttribute(&self, cx: *mut JSContext) -> NonNull<JSObject> {
         rooted!(in(cx) let array = JS_NewUint8ClampedArray(cx, 16));
-        assert!(!array.is_null());
-        NonZero::new_unchecked(array.get())
+        NonNull::new(array.get()).expect("got a null pointer")
     }
     #[allow(unsafe_code)]
     unsafe fn AnyAttribute(&self, _: *mut JSContext) -> JSVal { NullValue() }
     #[allow(unsafe_code)]
     unsafe fn SetAnyAttribute(&self, _: *mut JSContext, _: HandleValue) {}
     #[allow(unsafe_code)]
-    unsafe fn ObjectAttribute(&self, cx: *mut JSContext) -> NonZero<*mut JSObject> {
+    unsafe fn ObjectAttribute(&self, cx: *mut JSContext) -> NonNull<JSObject> {
         rooted!(in(cx) let obj = JS_NewPlainObject(cx));
-        assert!(!obj.is_null());
-        NonZero::new_unchecked(obj.get())
+        NonNull::new(obj.get()).expect("got a null pointer")
     }
     #[allow(unsafe_code)]
     unsafe fn SetObjectAttribute(&self, _: *mut JSContext, _: *mut JSObject) {}
@@ -220,7 +219,7 @@ impl TestBindingMethods for TestBinding {
         self.url.set(url);
     }
     #[allow(unsafe_code)]
-    unsafe fn GetObjectAttributeNullable(&self, _: *mut JSContext) -> Option<NonZero<*mut JSObject>> { None }
+    unsafe fn GetObjectAttributeNullable(&self, _: *mut JSContext) -> Option<NonNull<JSObject>> { None }
     #[allow(unsafe_code)]
     unsafe fn SetObjectAttributeNullable(&self, _: *mut JSContext, _: *mut JSObject) {}
     fn GetUnionAttributeNullable(&self) -> Option<HTMLElementOrLong> {
@@ -272,7 +271,7 @@ impl TestBindingMethods for TestBinding {
     #[allow(unsafe_code)]
     unsafe fn ReceiveAny(&self, _: *mut JSContext) -> JSVal { NullValue() }
     #[allow(unsafe_code)]
-    unsafe fn ReceiveObject(&self, cx: *mut JSContext) -> NonZero<*mut JSObject> {
+    unsafe fn ReceiveObject(&self, cx: *mut JSContext) -> NonNull<JSObject> {
         self.ObjectAttribute(cx)
     }
     fn ReceiveUnion(&self) -> HTMLElementOrLong { HTMLElementOrLong::Long(0) }
@@ -316,7 +315,7 @@ impl TestBindingMethods for TestBinding {
         Some(Blob::new(&self.global(), BlobImpl::new_from_bytes(vec![]), "".to_owned()))
     }
     #[allow(unsafe_code)]
-    unsafe fn ReceiveNullableObject(&self, cx: *mut JSContext) -> Option<NonZero<*mut JSObject>> {
+    unsafe fn ReceiveNullableObject(&self, cx: *mut JSContext) -> Option<NonNull<JSObject>> {
         self.GetObjectAttributeNullable(cx)
     }
     fn ReceiveNullableUnion(&self) -> Option<HTMLElementOrLong> {
@@ -390,6 +389,7 @@ impl TestBindingMethods for TestBinding {
             octetValue: None,
             requiredValue: true,
             seqDict: None,
+            elementSequence: None,
             shortValue: None,
             stringValue: None,
             type_: Some(DOMString::from("success")),
@@ -448,6 +448,14 @@ impl TestBindingMethods for TestBinding {
     fn PassCallbackFunction(&self, _: Rc<Function>) {}
     fn PassCallbackInterface(&self, _: Rc<EventListener>) {}
     fn PassSequence(&self, _: Vec<i32>) {}
+    #[allow(unsafe_code)]
+    unsafe fn PassAnySequence(&self, _: *mut JSContext, _: CustomAutoRooterGuard<Vec<JSVal>>) {}
+    #[allow(unsafe_code)]
+    unsafe fn AnySequencePassthrough(&self, _: *mut JSContext, seq: CustomAutoRooterGuard<Vec<JSVal>>) -> Vec<JSVal> {
+        (*seq).clone()
+    }
+    #[allow(unsafe_code)]
+    unsafe fn PassObjectSequence(&self, _: *mut JSContext, _: CustomAutoRooterGuard<Vec<*mut JSObject>>) {}
     fn PassStringSequence(&self, _: Vec<DOMString>) {}
     fn PassInterfaceSequence(&self, _: Vec<DomRoot<Blob>>) {}
 
@@ -600,6 +608,8 @@ impl TestBindingMethods for TestBinding {
     fn PassOptionalNullableStringWithNonNullDefault(&self, _: Option<DOMString>) {}
     fn PassOptionalNullableUsvstringWithNonNullDefault(&self, _: Option<USVString>) {}
     // fn PassOptionalNullableEnumWithNonNullDefault(self, _: Option<TestEnum>) {}
+    fn PassOptionalOverloaded(&self, a: &TestBinding, _: u32, _: u32) -> DomRoot<TestBinding> { DomRoot::from_ref(a) }
+    fn PassOptionalOverloaded_(&self, _: &Blob,  _: u32) { }
 
     fn PassVariadicBoolean(&self, _: Vec<bool>) {}
     fn PassVariadicBooleanAndDefault(&self, _: bool, _: Vec<bool>) {}
@@ -723,14 +733,14 @@ impl TestBindingMethods for TestBinding {
         p.append_native_handler(&handler);
         return p;
 
-        #[derive(HeapSizeOf, JSTraceable)]
+        #[derive(JSTraceable, MallocSizeOf)]
         struct SimpleHandler {
-            #[ignore_heap_size_of = "Rc has unclear ownership semantics"]
+            #[ignore_malloc_size_of = "Rc has unclear ownership semantics"]
             handler: Rc<SimpleCallback>,
         }
         impl SimpleHandler {
             fn new(callback: Rc<SimpleCallback>) -> Box<Callback> {
-                box SimpleHandler { handler: callback }
+                Box::new(SimpleHandler { handler: callback })
             }
         }
         impl Callback for SimpleHandler {
@@ -804,9 +814,9 @@ impl TestBinding {
     pub unsafe fn condition_unsatisfied(_: *mut JSContext, _: HandleObject) -> bool { false }
 }
 
-#[derive(HeapSizeOf, JSTraceable)]
+#[derive(JSTraceable, MallocSizeOf)]
 pub struct TestBindingCallback {
-    #[ignore_heap_size_of = "unclear ownership semantics"]
+    #[ignore_malloc_size_of = "unclear ownership semantics"]
     promise: TrustedPromise,
     value: DOMString,
 }

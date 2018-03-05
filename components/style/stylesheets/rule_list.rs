@@ -7,7 +7,10 @@
 #[cfg(feature = "gecko")]
 use malloc_size_of::{MallocShallowSizeOf, MallocSizeOfOps};
 use servo_arc::{Arc, RawOffsetArc};
-use shared_lock::{DeepCloneParams, DeepCloneWithLock, Locked, SharedRwLock, SharedRwLockReadGuard};
+use shared_lock::{DeepCloneParams, DeepCloneWithLock, Locked};
+use shared_lock::{SharedRwLock, SharedRwLockReadGuard, ToCssWithGuard};
+use std::fmt::{self, Write};
+use str::CssStringWriter;
 use stylesheets::{CssRule, RulesMutateError};
 use stylesheets::loader::StylesheetLoader;
 use stylesheets::rule_parser::State;
@@ -65,7 +68,7 @@ impl CssRules {
         })
     }
 
-    /// https://drafts.csswg.org/cssom/#remove-a-css-rule
+    /// <https://drafts.csswg.org/cssom/#remove-a-css-rule>
     pub fn remove_rule(&mut self, index: usize) -> Result<(), RulesMutateError> {
         // Step 1, 2
         if index >= self.0.len() {
@@ -88,11 +91,24 @@ impl CssRules {
         self.0.remove(index);
         Ok(())
     }
+
+    /// Serializes this CSSRules to CSS text as a block of rules.
+    ///
+    /// This should be speced into CSSOM spec at some point. See
+    /// <https://github.com/w3c/csswg-drafts/issues/1985>
+    pub fn to_css_block(&self, guard: &SharedRwLockReadGuard, dest: &mut CssStringWriter) -> fmt::Result {
+        dest.write_str(" {")?;
+        for rule in self.0.iter() {
+            dest.write_str("\n  ")?;
+            rule.to_css(guard, dest)?;
+        }
+        dest.write_str("\n}")
+    }
 }
 
 /// A trait to implement helpers for `Arc<Locked<CssRules>>`.
 pub trait CssRulesHelpers {
-    /// https://drafts.csswg.org/cssom/#insert-a-css-rule
+    /// <https://drafts.csswg.org/cssom/#insert-a-css-rule>
     ///
     /// Written in this funky way because parsing an @import rule may cause us
     /// to clone a stylesheet from the same document due to caching in the CSS

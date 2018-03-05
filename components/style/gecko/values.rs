@@ -16,14 +16,15 @@ use gecko_bindings::sugar::ns_style_coord::{CoordData, CoordDataMut, CoordDataVa
 use media_queries::Device;
 use nsstring::{nsACString, nsCStr};
 use std::cmp::max;
-use values::{Auto, Either, ExtremumLength, None_, Normal};
-use values::computed::{Angle, Length, LengthOrPercentage, LengthOrPercentageOrAuto};
+use values::{Auto, Either, None_, Normal};
+use values::computed::{Angle, ExtremumLength, Length, LengthOrPercentage, LengthOrPercentageOrAuto};
 use values::computed::{LengthOrPercentageOrNone, Number, NumberOrPercentage};
 use values::computed::{MaxLength, MozLength, Percentage};
 use values::computed::{NonNegativeLength, NonNegativeLengthOrPercentage, NonNegativeNumber};
 use values::computed::basic_shape::ShapeRadius as ComputedShapeRadius;
 use values::generics::{CounterStyleOrNone, NonNegative};
 use values::generics::basic_shape::ShapeRadius;
+use values::generics::box_::Perspective;
 use values::generics::gecko::ScrollSnapPoint;
 use values::generics::grid::{TrackBreadth, TrackKeyword};
 
@@ -214,7 +215,7 @@ impl<L: GeckoStyleCoordConvertible> GeckoStyleCoordConvertible for TrackBreadth<
     fn to_gecko_style_coord<T: CoordDataMut>(&self, coord: &mut T) {
         match *self {
             TrackBreadth::Breadth(ref lop) => lop.to_gecko_style_coord(coord),
-            TrackBreadth::Flex(fr) => coord.set_value(CoordDataValue::FlexFraction(fr)),
+            TrackBreadth::Fr(fr) => coord.set_value(CoordDataValue::FlexFraction(fr)),
             TrackBreadth::Keyword(TrackKeyword::Auto) => coord.set_value(CoordDataValue::Auto),
             TrackBreadth::Keyword(TrackKeyword::MinContent) =>
                 coord.set_value(CoordDataValue::Enumerated(StyleGridTrackBreadth::MinContent as u32)),
@@ -235,7 +236,7 @@ impl<L: GeckoStyleCoordConvertible> GeckoStyleCoordConvertible for TrackBreadth<
                         None
                     }
                 },
-                CoordDataValue::FlexFraction(fr) => Some(TrackBreadth::Flex(fr)),
+                CoordDataValue::FlexFraction(fr) => Some(TrackBreadth::Fr(fr)),
                 CoordDataValue::Auto => Some(TrackBreadth::Keyword(TrackKeyword::Auto)),
                 _ => L::from_gecko_style_coord(coord).map(TrackBreadth::Breadth),
             }
@@ -291,9 +292,9 @@ impl GeckoStyleCoordConvertible for Angle {
 
     fn from_gecko_style_coord<T: CoordData>(coord: &T) -> Option<Self> {
         match coord.as_value() {
-            CoordDataValue::Degree(val) => Some(Angle::Degree(val)),
-            CoordDataValue::Grad(val) => Some(Angle::Gradian(val)),
-            CoordDataValue::Radian(val) => Some(Angle::Radian(val)),
+            CoordDataValue::Degree(val) => Some(Angle::Deg(val)),
+            CoordDataValue::Grad(val) => Some(Angle::Grad(val)),
+            CoordDataValue::Radian(val) => Some(Angle::Rad(val)),
             CoordDataValue::Turn(val) => Some(Angle::Turn(val)),
             _ => None,
         }
@@ -348,10 +349,10 @@ impl GeckoStyleCoordConvertible for ExtremumLength {
         use gecko_bindings::structs::{NS_STYLE_WIDTH_MAX_CONTENT, NS_STYLE_WIDTH_MIN_CONTENT};
         coord.set_value(CoordDataValue::Enumerated(
             match *self {
-                ExtremumLength::MaxContent => NS_STYLE_WIDTH_MAX_CONTENT,
-                ExtremumLength::MinContent => NS_STYLE_WIDTH_MIN_CONTENT,
-                ExtremumLength::FitContent => NS_STYLE_WIDTH_FIT_CONTENT,
-                ExtremumLength::FillAvailable => NS_STYLE_WIDTH_AVAILABLE,
+                ExtremumLength::MozMaxContent => NS_STYLE_WIDTH_MAX_CONTENT,
+                ExtremumLength::MozMinContent => NS_STYLE_WIDTH_MIN_CONTENT,
+                ExtremumLength::MozFitContent => NS_STYLE_WIDTH_FIT_CONTENT,
+                ExtremumLength::MozAvailable => NS_STYLE_WIDTH_AVAILABLE,
             }
         ))
     }
@@ -361,12 +362,12 @@ impl GeckoStyleCoordConvertible for ExtremumLength {
         use gecko_bindings::structs::{NS_STYLE_WIDTH_MAX_CONTENT, NS_STYLE_WIDTH_MIN_CONTENT};
         match coord.as_value() {
             CoordDataValue::Enumerated(NS_STYLE_WIDTH_MAX_CONTENT) =>
-                Some(ExtremumLength::MaxContent),
+                Some(ExtremumLength::MozMaxContent),
             CoordDataValue::Enumerated(NS_STYLE_WIDTH_MIN_CONTENT) =>
-                Some(ExtremumLength::MinContent),
+                Some(ExtremumLength::MozMinContent),
             CoordDataValue::Enumerated(NS_STYLE_WIDTH_FIT_CONTENT) =>
-                Some(ExtremumLength::FitContent),
-            CoordDataValue::Enumerated(NS_STYLE_WIDTH_AVAILABLE) => Some(ExtremumLength::FillAvailable),
+                Some(ExtremumLength::MozFitContent),
+            CoordDataValue::Enumerated(NS_STYLE_WIDTH_AVAILABLE) => Some(ExtremumLength::MozAvailable),
             _ => None,
         }
     }
@@ -419,6 +420,27 @@ impl GeckoStyleCoordConvertible for ScrollSnapPoint<LengthOrPercentage> {
                             .expect("coord could not convert to LengthOrPercentage")),
             }
         )
+    }
+}
+
+impl<L> GeckoStyleCoordConvertible for Perspective<L>
+where
+    L: GeckoStyleCoordConvertible,
+{
+    fn to_gecko_style_coord<T: CoordDataMut>(&self, coord: &mut T) {
+        match *self {
+            Perspective::None => coord.set_value(CoordDataValue::None),
+            Perspective::Length(ref l) => l.to_gecko_style_coord(coord),
+        };
+    }
+
+    fn from_gecko_style_coord<T: CoordData>(coord: &T) -> Option<Self> {
+        use gecko_bindings::structs::root::nsStyleUnit;
+
+        if coord.unit() == nsStyleUnit::eStyleUnit_None {
+            return Some(Perspective::None);
+        }
+        Some(Perspective::Length(L::from_gecko_style_coord(coord)?))
     }
 }
 

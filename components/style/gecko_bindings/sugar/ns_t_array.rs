@@ -36,6 +36,7 @@ impl<T> nsTArray<T> {
         debug_assert!(!self.mBuffer.is_null());
         unsafe { mem::transmute(self.mBuffer) }
     }
+
     // unsafe, since header may be in shared static or something
     unsafe fn header_mut<'a>(&'a mut self) -> &'a mut nsTArrayHeader {
         debug_assert!(!self.mBuffer.is_null());
@@ -99,7 +100,7 @@ impl<T> nsTArray<T> {
     /// This will not leak since it only works on POD types (and thus doesn't assert)
     pub unsafe fn set_len_pod(&mut self, len: u32) where T: Copy {
         self.ensure_capacity(len as usize);
-        let header = unsafe { self.header_mut() };
+        let header = self.header_mut();
         header.mLength = len;
     }
 }

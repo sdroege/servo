@@ -10,7 +10,8 @@ policies and contribution forms [3].
 [3] http://www.w3.org/2004/10/27-testcases
 */
 
-/* Documentation is in docs/api.md */
+/* Documentation: http://web-platform-tests.org/writing-tests/testharness-api.html
+ * (../docs/_writing-tests/testharness-api.md) */
 
 (function ()
 {
@@ -432,15 +433,25 @@ policies and contribution forms [3].
         // all imported scripts have been fetched and executed. It's the
         // equivalent of an onload event for a document. All tests should have
         // been added by the time this event is received, thus it's not
-        // necessary to wait until the onactivate event.
-        on_event(self, "install",
-                function(event) {
-                    this_obj.all_loaded = true;
-                    if (this_obj.on_loaded_callback) {
-                        this_obj.on_loaded_callback();
-                    }
-                });
+        // necessary to wait until the onactivate event. However, tests for
+        // installed service workers need another event which is equivalent to
+        // the onload event because oninstall is fired only on installation. The
+        // onmessage event is used for that purpose since tests using
+        // testharness.js should ask the result to its service worker by
+        // PostMessage. If the onmessage event is triggered on the service
+        // worker's context, that means the worker's script has been evaluated.
+        on_event(self, "install", on_all_loaded);
+        on_event(self, "message", on_all_loaded);
+        function on_all_loaded() {
+            if (this_obj.all_loaded)
+                return;
+            this_obj.all_loaded = true;
+            if (this_obj.on_loaded_callback) {
+              this_obj.on_loaded_callback();
+            }
+        }
     }
+
     ServiceWorkerTestEnvironment.prototype = Object.create(WorkerTestEnvironment.prototype);
 
     ServiceWorkerTestEnvironment.prototype.add_on_loaded_callback = function(callback) {
@@ -482,7 +493,10 @@ policies and contribution forms [3].
     }
 
     function is_service_worker(worker) {
-        return 'ServiceWorker' in self && worker instanceof ServiceWorker;
+        // The worker object may be from another execution context,
+        // so do not use instanceof here.
+        return 'ServiceWorker' in self &&
+            Object.prototype.toString.call(worker) == '[object ServiceWorker]';
     }
 
     /*
@@ -524,7 +538,7 @@ policies and contribution forms [3].
         }
         tests.promise_tests = tests.promise_tests.then(function() {
             var donePromise = new Promise(function(resolve) {
-                test.add_cleanup(resolve);
+                test._add_cleanup(resolve);
             });
             var promise = test.step(func, test, test);
             test.step(function() {
@@ -565,12 +579,21 @@ policies and contribution forms [3].
 
         var waitingFor = null;
 
+        // This is null unless we are recording all events, in which case it
+        // will be an Array object.
+        var recordedEvents = null;
+
         var eventHandler = test.step_func(function(evt) {
             assert_true(!!waitingFor,
                         'Not expecting event, but got ' + evt.type + ' event');
             assert_equals(evt.type, waitingFor.types[0],
                           'Expected ' + waitingFor.types[0] + ' event, but got ' +
                           evt.type + ' event instead');
+
+            if (Array.isArray(recordedEvents)) {
+                recordedEvents.push(evt);
+            }
+
             if (waitingFor.types.length > 1) {
                 // Pop first event from array
                 waitingFor.types.shift();
@@ -581,7 +604,10 @@ policies and contribution forms [3].
             // need to set waitingFor.
             var resolveFunc = waitingFor.resolve;
             waitingFor = null;
-            resolveFunc(evt);
+            // Likewise, we should reset the state of recordedEvents.
+            var result = recordedEvents || evt;
+            recordedEvents = null;
+            resolveFunc(result);
         });
 
         for (var i = 0; i < eventTypes.length; i++) {
@@ -591,13 +617,35 @@ policies and contribution forms [3].
         /**
          * Returns a Promise that will resolve after the specified event or
          * series of events has occured.
+         *
+         * @param options An optional options object. If the 'record' property
+         *                on this object has the value 'all', when the Promise
+         *                returned by this function is resolved,  *all* Event
+         *                objects that were waited for will be returned as an
+         *                array.
+         *
+         * For example,
+         *
+         * ```js
+         * const watcher = new EventWatcher(t, div, [ 'animationstart',
+         *                                            'animationiteration',
+         *                                            'animationend' ]);
+         * return watcher.wait_for([ 'animationstart', 'animationend' ],
+         *                         { record: 'all' }).then(evts => {
+         *   assert_equals(evts[0].elapsedTime, 0.0);
+         *   assert_equals(evts[1].elapsedTime, 2.0);
+         * });
+         * ```
          */
-        this.wait_for = function(types) {
+        this.wait_for = function(types, options) {
             if (waitingFor) {
                 return Promise.reject('Already waiting for an event or events');
             }
             if (typeof types == 'string') {
                 types = [types];
+            }
+            if (options && options.record && options.record === 'all') {
+                recordedEvents = [];
             }
             return new Promise(function(resolve, reject) {
                 waitingFor = {
@@ -614,7 +662,7 @@ policies and contribution forms [3].
             }
         };
 
-        test.add_cleanup(stop_watching);
+        test._add_cleanup(stop_watching);
 
         return this;
     }
@@ -948,6 +996,10 @@ policies and contribution forms [3].
 
     function assert_array_equals(actual, expected, description)
     {
+        assert(typeof actual === "object" && actual !== null && "length" in actual,
+               "assert_array_equals", description,
+               "value is ${actual}, expected array",
+               {actual:actual});
         assert(actual.length === expected.length,
                "assert_array_equals", description,
                "lengths differ, expected ${expected} got ${actual}",
@@ -966,6 +1018,34 @@ policies and contribution forms [3].
         }
     }
     expose(assert_array_equals, "assert_array_equals");
+
+    function assert_array_approx_equals(actual, expected, epsilon, description)
+    {
+        /*
+         * Test if two primitive arrays are equal withing +/- epsilon
+         */
+        assert(actual.length === expected.length,
+               "assert_array_approx_equals", description,
+               "lengths differ, expected ${expected} got ${actual}",
+               {expected:expected.length, actual:actual.length});
+
+        for (var i = 0; i < actual.length; i++) {
+            assert(actual.hasOwnProperty(i) === expected.hasOwnProperty(i),
+                   "assert_array_approx_equals", description,
+                   "property ${i}, property expected to be ${expected} but was ${actual}",
+                   {i:i, expected:expected.hasOwnProperty(i) ? "present" : "missing",
+                   actual:actual.hasOwnProperty(i) ? "present" : "missing"});
+            assert(typeof actual[i] === "number",
+                   "assert_array_approx_equals", description,
+                   "property ${i}, expected a number but got a ${type_actual}",
+                   {i:i, type_actual:typeof actual[i]});
+            assert(Math.abs(actual[i] - expected[i]) <= epsilon,
+                   "assert_array_approx_equals", description,
+                   "property ${i}, expected ${expected} +/- ${epsilon}, expected ${expected} but got ${actual}",
+                   {i:i, expected:expected[i], actual:actual[i]});
+        }
+    }
+    expose(assert_array_approx_equals, "assert_array_approx_equals");
 
     function assert_approx_equals(actual, expected, epsilon, description)
     {
@@ -1177,11 +1257,22 @@ policies and contribution forms [3].
             if (e instanceof AssertionError) {
                 throw e;
             }
+
+            assert(typeof e === "object",
+                   "assert_throws", description,
+                   "${func} threw ${e} with type ${type}, not an object",
+                   {func:func, e:e, type:typeof e});
+
+            assert(e !== null,
+                   "assert_throws", description,
+                   "${func} threw null, not an object",
+                   {func:func});
+
             if (code === null) {
-                return;
+                throw new AssertionError('Test bug: need to pass exception to assert_throws()');
             }
             if (typeof code === "object") {
-                assert(typeof e == "object" && "name" in e && e.name == code.name,
+                assert("name" in e && e.name == code.name,
                        "assert_throws", description,
                        "${func} threw ${actual} (${actual_name}) expected ${expected} (${expected_name})",
                                     {func:func, actual:e, actual_name:e.name,
@@ -1250,8 +1341,7 @@ policies and contribution forms [3].
                 ReadOnlyError: 0,
                 VersionError: 0,
                 OperationError: 0,
-                NotAllowedError: 0,
-                CancelationError: 0,
+                NotAllowedError: 0
             };
 
             if (!(name in name_code_map)) {
@@ -1261,8 +1351,7 @@ policies and contribution forms [3].
             var required_props = { code: name_code_map[name] };
 
             if (required_props.code === 0 ||
-               (typeof e == "object" &&
-                "name" in e &&
+               ("name" in e &&
                 e.name !== e.name.toUpperCase() &&
                 e.name !== "DOMException")) {
                 // New style exception: also test the name property.
@@ -1274,13 +1363,8 @@ policies and contribution forms [3].
             //in.  It might be an instanceof the appropriate interface on some
             //unknown other window.  TODO: Work around this somehow?
 
-            assert(typeof e == "object",
-                   "assert_throws", description,
-                   "${func} threw ${e} with type ${type}, not an object",
-                   {func:func, e:e, type:typeof e});
-
             for (var prop in required_props) {
-                assert(typeof e == "object" && prop in e && e[prop] == required_props[prop],
+                assert(prop in e && e[prop] == required_props[prop],
                        "assert_throws", description,
                        "${func} threw ${e} that is not a DOMException " + code + ": property ${prop} is equal to ${actual}, expected ${expected}",
                        {func:func, e:e, prop:prop, actual:e[prop], expected:required_props[prop]});
@@ -1323,7 +1407,8 @@ policies and contribution forms [3].
         }
         this.name = name;
 
-        this.phase = this.phases.INITIAL;
+        this.phase = tests.phase === tests.phases.ABORTED ?
+            this.phases.COMPLETE : this.phases.INITIAL;
 
         this.status = this.NOTRUN;
         this.timeout_id = null;
@@ -1343,6 +1428,7 @@ policies and contribution forms [3].
         this.steps = [];
 
         this.cleanup_callbacks = [];
+        this._user_defined_cleanup_count = 0;
 
         tests.push(this);
     }
@@ -1371,12 +1457,14 @@ policies and contribution forms [3].
             this._structured_clone = merge({
                 name:String(this.name),
                 properties:merge({}, this.properties),
+                phases:merge({}, this.phases)
             }, Test.statuses);
         }
         this._structured_clone.status = this.status;
         this._structured_clone.message = this.message;
         this._structured_clone.stack = this.stack;
         this._structured_clone.index = this.index;
+        this._structured_clone.phase = this.phase;
         return this._structured_clone;
     };
 
@@ -1465,13 +1553,25 @@ policies and contribution forms [3].
         }), timeout * tests.timeout_multiplier);
     }
 
-    Test.prototype.add_cleanup = function(callback) {
+    /*
+     * Private method for registering cleanup functions. `testharness.js`
+     * internals should use this method instead of the public `add_cleanup`
+     * method in order to hide implementation details from the harness status
+     * message in the case errors.
+     */
+    Test.prototype._add_cleanup = function(callback) {
         this.cleanup_callbacks.push(callback);
     };
 
-    Test.prototype.force_timeout = function() {
-        this.set_status(this.TIMEOUT);
-        this.phase = this.phases.HAS_RESULT;
+    /*
+     * Schedule a function to be run after the test result is known, regardless
+     * of passing or failing state. The behavior of this function will not
+     * influence the result of the test, but if an exception is thrown, the
+     * test harness will report an error.
+     */
+    Test.prototype.add_cleanup = function(callback) {
+        this._user_defined_cleanup_count += 1;
+        this._add_cleanup(callback);
     };
 
     Test.prototype.set_timeout = function()
@@ -1500,6 +1600,8 @@ policies and contribution forms [3].
         this.done();
     };
 
+    Test.prototype.force_timeout = Test.prototype.timeout;
+
     Test.prototype.done = function()
     {
         if (this.phase == this.phases.COMPLETE) {
@@ -1517,11 +1619,35 @@ policies and contribution forms [3].
         this.cleanup();
     };
 
+    /*
+     * Invoke all specified cleanup functions. If one or more produce an error,
+     * the context is in an unpredictable state, so all further testing should
+     * be cancelled.
+     */
     Test.prototype.cleanup = function() {
+        var error_count = 0;
+        var total;
+
         forEach(this.cleanup_callbacks,
                 function(cleanup_callback) {
-                    cleanup_callback();
+                    try {
+                        cleanup_callback();
+                    } catch (e) {
+                        // Set test phase immediately so that tests declared
+                        // within subsequent cleanup functions are not run.
+                        tests.phase = tests.phases.ABORTED;
+                        error_count += 1;
+                    }
                 });
+
+        if (error_count > 0) {
+            total = this._user_defined_cleanup_count;
+            tests.status.status = tests.status.ERROR;
+            tests.status.message = "Test named '" + this.name +
+                "' specified " + total + " 'cleanup' function" +
+                (total > 1 ? "s" : "") + ", and " + error_count + " failed.";
+            tests.status.stack = null;
+        }
     };
 
     /*
@@ -1547,10 +1673,12 @@ policies and contribution forms [3].
         var clone = {};
         Object.keys(this).forEach(
                 (function(key) {
-                    if (typeof(this[key]) === "object") {
-                        clone[key] = merge({}, this[key]);
+                    var value = this[key];
+
+                    if (typeof value === "object" && value !== null) {
+                        clone[key] = merge({}, value);
                     } else {
-                        clone[key] = this[key];
+                        clone[key] = value;
                     }
                 }).bind(this));
         clone.phases = merge({}, this.phases);
@@ -1585,7 +1713,13 @@ policies and contribution forms [3].
         this.tests = new Array();
 
         var this_obj = this;
-        remote.onerror = function(error) { this_obj.remote_error(error); };
+        // If remote context is cross origin assigning to onerror is not
+        // possible, so silently catch those errors.
+        try {
+          remote.onerror = function(error) { this_obj.remote_error(error); };
+        } catch (e) {
+          // Ignore.
+        }
 
         // Keeping a reference to the remote object and the message handler until
         // remote_done() is seen prevents the remote object and its message channel
@@ -1703,7 +1837,8 @@ policies and contribution forms [3].
             SETUP:1,
             HAVE_TESTS:2,
             HAVE_RESULTS:3,
-            COMPLETE:4
+            COMPLETE:4,
+            ABORTED:5
         };
         this.phase = this.phases.INITIAL;
 
@@ -1837,7 +1972,8 @@ policies and contribution forms [3].
     };
 
     Tests.prototype.all_done = function() {
-        return (this.tests.length > 0 && test_environment.all_loaded &&
+        return this.phase === this.phases.ABORTED ||
+            (this.tests.length > 0 && test_environment.all_loaded &&
                 this.num_pending === 0 && !this.wait_for_finish &&
                 !this.processing_callbacks &&
                 !this.pending_remotes.some(function(w) { return w.running; }));
@@ -1956,11 +2092,7 @@ policies and contribution forms [3].
         var message_port;
 
         if (is_service_worker(worker)) {
-            // Microsoft Edge's implementation of ServiceWorker doesn't support MessagePort yet.
-            // Feature detection isn't a straightforward option here; it's only possible in the
-            // worker's script context.
-            var isMicrosoftEdgeBrowser = navigator.userAgent.includes("Edge");
-            if (window.MessageChannel && !isMicrosoftEdgeBrowser) {
+            if (window.MessageChannel) {
                 // The ServiceWorker's implicit MessagePort is currently not
                 // reliably accessible from the ServiceWorkerGlobalScope due to
                 // Blink setting MessageEvent.source to null for messages sent
@@ -1980,6 +2112,7 @@ policies and contribution forms [3].
             }
         } else if (is_shared_worker(worker)) {
             message_port = worker.port;
+            message_port.start();
         } else {
             message_port = worker;
         }
@@ -2129,12 +2262,29 @@ policies and contribution forms [3].
         }
         var node = output_document.getElementById("log");
         if (!node) {
-            if (!document.body || document.readyState == "loading") {
+            if (!document.readyState == "loading") {
                 return;
             }
-            node = output_document.createElement("div");
+            node = output_document.createElementNS("http://www.w3.org/1999/xhtml", "div");
             node.id = "log";
-            output_document.body.appendChild(node);
+            if (output_document.body) {
+                output_document.body.appendChild(node);
+            } else {
+                var is_svg = false;
+                var output_window = output_document.defaultView;
+                if (output_window && "SVGSVGElement" in output_window) {
+                    is_svg = output_document.documentElement instanceof output_window.SVGSVGElement;
+                }
+                if (is_svg) {
+                    var foreignObject = output_document.createElementNS("http://www.w3.org/2000/svg", "foreignObject");
+                    foreignObject.setAttribute("width", "100%");
+                    foreignObject.setAttribute("height", "100%");
+                    output_document.documentElement.appendChild(foreignObject);
+                    foreignObject.appendChild(node);
+                } else {
+                    output_document.documentElement.appendChild(node);
+                }
+            }
         }
         this.output_document = output_document;
         this.output_node = node;

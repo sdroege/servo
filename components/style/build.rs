@@ -69,7 +69,7 @@ fn generate_properties() {
         }
     }
 
-    let script = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap())
+    let script = Path::new(&env::var_os("CARGO_MANIFEST_DIR").unwrap())
         .join("properties").join("build.py");
     let product = if cfg!(feature = "gecko") { "gecko" } else { "servo" };
     let status = Command::new(&*PYTHON)
@@ -84,6 +84,15 @@ fn generate_properties() {
 }
 
 fn main() {
+    let gecko = cfg!(feature = "gecko");
+    let servo = cfg!(feature = "servo");
+    if !(gecko || servo) {
+        panic!("The style crate requires enabling one of its 'servo' or 'gecko' feature flags");
+    }
+    if gecko && servo {
+        panic!("The style crate does not support enabling both its 'servo' or 'gecko' \
+                feature flags at the same time.");
+    }
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:out_dir={}", env::var("OUT_DIR").unwrap());
     generate_properties();

@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use app_units::{Au, AU_PER_PX};
+use cssparser::{Parser, ParserInput};
 use document_loader::{LoadType, LoadBlocker};
 use dom::activation::Activatable;
 use dom::attr::Attr;
@@ -45,20 +46,46 @@ use net_traits::image::base::{Image, ImageMetadata};
 use net_traits::image_cache::{CanRequestImages, ImageCache, ImageOrMetadataAvailable};
 use net_traits::image_cache::{ImageResponder, ImageResponse, ImageState, PendingImageId};
 use net_traits::image_cache::UsePlaceholder;
-use net_traits::request::{RequestInit, Type as RequestType};
+use net_traits::request::RequestInit;
 use network_listener::{NetworkListener, PreInvoke};
 use num_traits::ToPrimitive;
 use script_thread::ScriptThread;
 use servo_url::ServoUrl;
 use servo_url::origin::ImmutableOrigin;
 use std::cell::{Cell, RefMut};
+use std::char;
 use std::default::Default;
 use std::i32;
 use std::sync::{Arc, Mutex};
-use style::attr::{AttrValue, LengthOrPercentageOrAuto};
+use style::attr::{AttrValue, LengthOrPercentageOrAuto, parse_double, parse_unsigned_integer};
+use style::context::QuirksMode;
+use style::media_queries::MediaQuery;
+use style::parser::ParserContext;
+use style::str::is_ascii_digit;
+use style::values::specified::{Length, ViewportPercentageLength};
+use style::values::specified::length::NoCalcLength;
+use style_traits::ParsingMode;
 use task_source::TaskSource;
 
-#[derive(Clone, Copy, HeapSizeOf, JSTraceable)]
+enum ParseState {
+    InDescriptor,
+    InParens,
+    AfterDescriptor,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ImageSource {
+    pub url: String,
+    pub descriptor: Descriptor,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Descriptor {
+    pub wid: Option<u32>,
+    pub den: Option<f64>,
+}
+
+#[derive(Clone, Copy, JSTraceable, MallocSizeOf)]
 #[allow(dead_code)]
 enum State {
     Unavailable,
@@ -66,19 +93,26 @@ enum State {
     CompletelyAvailable,
     Broken,
 }
-#[derive(Clone, Copy, HeapSizeOf, JSTraceable)]
+
+#[derive(Debug, PartialEq)]
+pub struct Size {
+    pub query: Option<MediaQuery>,
+    pub length: Length,
+}
+
+#[derive(Clone, Copy, JSTraceable, MallocSizeOf)]
 enum ImageRequestPhase {
     Pending,
     Current
 }
-#[derive(HeapSizeOf, JSTraceable)]
+#[derive(JSTraceable, MallocSizeOf)]
 #[must_root]
 struct ImageRequest {
     state: State,
     parsed_url: Option<ServoUrl>,
     source_url: Option<DOMString>,
     blocker: Option<LoadBlocker>,
-    #[ignore_heap_size_of = "Arc"]
+    #[ignore_malloc_size_of = "Arc"]
     image: Option<Arc<Image>>,
     metadata: Option<ImageMetadata>,
     final_url: Option<ServoUrl>,
@@ -166,7 +200,7 @@ impl HTMLImageElement {
             let task_source = window.networking_task_source();
             let task_canceller = window.task_canceller();
             let generation = elem.generation.get();
-            ROUTER.add_route(responder_receiver.to_opaque(), box move |message| {
+            ROUTER.add_route(responder_receiver.to_opaque(), Box::new(move |message| {
                 debug!("Got image {:?}", message);
                 // Return the image via a message to the script thread, which marks
                 // the element as dirty and triggers a reflow.
@@ -183,7 +217,7 @@ impl HTMLImageElement {
                     }),
                     &task_canceller,
                 );
-            });
+            }));
 
             image_cache.add_listener(id, ImageResponder::new(responder_sender, id));
         }
@@ -234,14 +268,13 @@ impl HTMLImageElement {
             task_source: window.networking_task_source(),
             canceller: Some(window.task_canceller()),
         };
-        ROUTER.add_route(action_receiver.to_opaque(), box move |message| {
+        ROUTER.add_route(action_receiver.to_opaque(), Box::new(move |message| {
             listener.notify_fetch(message.to().unwrap());
-        });
+        }));
 
         let request = RequestInit {
             url: img_url.clone(),
             origin: document.origin().immutable().clone(),
-            type_: RequestType::Image,
             pipeline_id: Some(document.global().pipeline_id()),
             .. RequestInit::default()
         };
@@ -323,7 +356,7 @@ impl HTMLImageElement {
         window.add_pending_reflow();
     }
 
-    /// https://html.spec.whatwg.org/multipage/#abort-the-image-request
+    /// <https://html.spec.whatwg.org/multipage/#abort-the-image-request>
     fn abort_request(&self, state: State, request: ImageRequestPhase) {
         let mut request = match request {
             ImageRequestPhase::Current => self.current_request.borrow_mut(),
@@ -335,7 +368,7 @@ impl HTMLImageElement {
         request.metadata = None;
     }
 
-    /// https://html.spec.whatwg.org/multipage/#update-the-source-set
+    /// <https://html.spec.whatwg.org/multipage/#update-the-source-set>
     fn update_source_set(&self) -> Vec<DOMString> {
         let elem = self.upcast::<Element>();
         // TODO: follow the algorithm
@@ -346,7 +379,7 @@ impl HTMLImageElement {
         vec![src]
     }
 
-    /// https://html.spec.whatwg.org/multipage/#select-an-image-source
+    /// <https://html.spec.whatwg.org/multipage/#select-an-image-source>
     fn select_image_source(&self) -> Option<DOMString> {
         // TODO: select an image source from source set
         self.update_source_set().first().cloned()
@@ -502,7 +535,7 @@ impl HTMLImageElement {
         }
     }
 
-    /// https://html.spec.whatwg.org/multipage/#update-the-image-data
+    /// <https://html.spec.whatwg.org/multipage/#update-the-image-data>
     fn update_the_image_data(&self) {
         let document = document_from_node(self);
         let window = document.window();
@@ -606,7 +639,7 @@ impl HTMLImageElement {
     pub fn new(local_name: LocalName,
                prefix: Option<Prefix>,
                document: &Document) -> DomRoot<HTMLImageElement> {
-        Node::reflect_node(box HTMLImageElement::new_inherited(local_name, prefix, document),
+        Node::reflect_node(Box::new(HTMLImageElement::new_inherited(local_name, prefix, document)),
                            document,
                            HTMLImageElementBinding::Wrap)
     }
@@ -627,10 +660,7 @@ impl HTMLImageElement {
     }
     pub fn areas(&self) -> Option<Vec<DomRoot<HTMLAreaElement>>> {
         let elem = self.upcast::<Element>();
-        let usemap_attr = match elem.get_attribute(&ns!(), &local_name!("usemap")) {
-            Some(attr) => attr,
-            None => return None,
-        };
+        let usemap_attr = elem.get_attribute(&ns!(), &local_name!("usemap"))?;
 
         let value = usemap_attr.value();
 
@@ -661,7 +691,7 @@ impl HTMLImageElement {
 
 }
 
-#[derive(HeapSizeOf, JSTraceable)]
+#[derive(JSTraceable, MallocSizeOf)]
 pub enum ImageElementMicrotask {
     StableStateUpdateImageDataTask {
         elem: DomRoot<HTMLImageElement>,
@@ -728,6 +758,60 @@ impl LayoutHTMLImageElementHelpers for LayoutDom<HTMLImageElement> {
     }
 }
 
+//https://html.spec.whatwg.org/multipage/#parse-a-sizes-attribute
+pub fn parse_a_sizes_attribute(input: DOMString, width: Option<u32>) -> Vec<Size> {
+    let mut sizes = Vec::<Size>::new();
+    for unparsed_size in input.split(',') {
+        let whitespace = unparsed_size.chars().rev().take_while(|c| char::is_whitespace(*c)).count();
+        let trimmed: String = unparsed_size.chars().take(unparsed_size.chars().count() - whitespace).collect();
+
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut input = ParserInput::new(&trimmed);
+        let url = ServoUrl::parse("about:blank").unwrap();
+        let context = ParserContext::new_for_cssom(&url,
+                                                   None,
+                                                   ParsingMode::empty(),
+                                                   QuirksMode::NoQuirks);
+        let mut parser = Parser::new(&mut input);
+        let length = parser.try(|i| Length::parse_non_negative(&context, i));
+        match length {
+            Ok(len) => sizes.push(Size {
+                length: len,
+                query: None
+            }),
+            Err(_) => {
+                let mut media_query_parser = parser;
+                let media_query = media_query_parser.try(|i| MediaQuery::parse(&context, i));
+                if let Ok(query) = media_query {
+                    let length = Length::parse_non_negative(&context, &mut media_query_parser);
+                        if let Ok(length) = length {
+                            sizes.push(Size {
+                                length: length,
+                                query: Some(query)
+                        })
+                    }
+                }
+            },
+        }
+    }
+    if sizes.is_empty() {
+        let size = match width {
+            Some(w) => Size {
+                length: Length::from_px(w as f32),
+                query: None
+            },
+            None => Size {
+                length: Length::NoCalc(NoCalcLength::ViewportPercentage(ViewportPercentageLength::Vw(100.))),
+                query: None
+            },
+        };
+        sizes.push(size);
+    }
+    sizes
+}
+
 impl HTMLImageElementMethods for HTMLImageElement {
     // https://html.spec.whatwg.org/multipage/#dom-img-alt
     make_getter!(Alt, "alt");
@@ -736,6 +820,7 @@ impl HTMLImageElementMethods for HTMLImageElement {
 
     // https://html.spec.whatwg.org/multipage/#dom-img-src
     make_url_getter!(Src, "src");
+
     // https://html.spec.whatwg.org/multipage/#dom-img-src
     make_setter!(SetSrc, "src");
 
@@ -977,4 +1062,178 @@ fn image_dimension_setter(element: &Element, attr: LocalName, value: u32) {
     let dim = LengthOrPercentageOrAuto::Length(Au::from_px(pixel_value as i32));
     let value = AttrValue::Dimension(value.to_string(), dim);
     element.set_attribute(&attr, value);
+}
+
+/// Collect sequence of code points
+pub fn collect_sequence_characters<F>(s: &str, predicate: F) -> (&str, &str)
+    where F: Fn(&char) -> bool
+{
+    for (i, ch) in s.chars().enumerate() {
+        if !predicate(&ch) {
+            return (&s[0..i], &s[i..])
+        }
+    }
+
+    return (s, "");
+}
+
+/// Parse an `srcset` attribute - https://html.spec.whatwg.org/multipage/#parsing-a-srcset-attribute.
+pub fn parse_a_srcset_attribute(input: &str) -> Vec<ImageSource> {
+    let mut url_len = 0;
+    let mut candidates: Vec<ImageSource> = vec![];
+    while url_len < input.len() {
+        let position = &input[url_len..];
+        let (spaces, position) = collect_sequence_characters(position, |c| *c == ',' || char::is_whitespace(*c));
+        // add the length of the url that we parse to advance the start index
+        let space_len = spaces.char_indices().count();
+        url_len += space_len;
+        if position.is_empty() {
+            return candidates;
+        }
+        let (url, spaces) = collect_sequence_characters(position, |c| !char::is_whitespace(*c));
+        // add the counts of urls that we parse to advance the start index
+        url_len += url.chars().count();
+        let comma_count = url.chars().rev().take_while(|c| *c == ',').count();
+        let url: String = url.chars().take(url.chars().count() - comma_count).collect();
+        // add 1 to start index, for the comma
+        url_len += comma_count + 1;
+        let (space, position) = collect_sequence_characters(spaces, |c| char::is_whitespace(*c));
+        let space_len = space.len();
+        url_len += space_len;
+        let mut descriptors = Vec::new();
+        let mut current_descriptor = String::new();
+        let mut state = ParseState::InDescriptor;
+        let mut char_stream = position.chars().enumerate();
+        let mut buffered: Option<(usize, char)> = None;
+        loop {
+            let next_char = buffered.take().or_else(|| char_stream.next());
+            if next_char.is_some() {
+                url_len += 1;
+            }
+            match state {
+                ParseState::InDescriptor => {
+                    match next_char {
+                        Some((_, ' ')) => {
+                            if !current_descriptor.is_empty() {
+                                descriptors.push(current_descriptor.clone());
+                                current_descriptor = String::new();
+                                state = ParseState::AfterDescriptor;
+                            }
+                            continue;
+                        }
+                        Some((_, ',')) => {
+                            if !current_descriptor.is_empty() {
+                                descriptors.push(current_descriptor.clone());
+                            }
+                            break;
+                        }
+                        Some((_, c @ '(')) => {
+                            current_descriptor.push(c);
+                            state = ParseState::InParens;
+                            continue;
+                        }
+                        Some((_, c)) => {
+                            current_descriptor.push(c);
+                        }
+                        None => {
+                            if !current_descriptor.is_empty() {
+                                descriptors.push(current_descriptor.clone());
+                            }
+                            break;
+                        }
+                    }
+                }
+                ParseState::InParens => {
+                    match next_char {
+                        Some((_, c @ ')')) => {
+                            current_descriptor.push(c);
+                            state = ParseState::InDescriptor;
+                            continue;
+                        }
+                        Some((_, c)) => {
+                            current_descriptor.push(c);
+                            continue;
+                        }
+                        None => {
+                            if !current_descriptor.is_empty() {
+                                descriptors.push(current_descriptor.clone());
+                            }
+                            break;
+                        }
+                    }
+                }
+                ParseState::AfterDescriptor => {
+                    match next_char {
+                        Some((_, ' ')) => {
+                            state = ParseState::AfterDescriptor;
+                            continue;
+                        }
+                        Some((idx, c)) => {
+                            state = ParseState::InDescriptor;
+                            buffered = Some((idx, c));
+                            continue;
+                        }
+                        None => {
+                            if !current_descriptor.is_empty() {
+                                descriptors.push(current_descriptor.clone());
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut error = false;
+        let mut width: Option<u32> = None;
+        let mut density: Option<f64> = None;
+        let mut future_compat_h: Option<u32> = None;
+        for descriptor in descriptors {
+            let (digits, remaining) = collect_sequence_characters(&descriptor, |c| is_ascii_digit(c) || *c == '.');
+            let valid_non_negative_integer = parse_unsigned_integer(digits.chars());
+            let has_w = remaining == "w";
+            let valid_floating_point = parse_double(digits);
+            let has_x = remaining == "x";
+            let has_h = remaining == "h";
+            if valid_non_negative_integer.is_ok() && has_w {
+                let result = valid_non_negative_integer;
+                error = result.is_err();
+                if width.is_some() || density.is_some() {
+                    error = true;
+                }
+                if let Ok(w) = result {
+                    width = Some(w);
+                }
+            } else if valid_floating_point.is_ok() && has_x {
+                let result = valid_floating_point;
+                error = result.is_err();
+                if width.is_some() || density.is_some() || future_compat_h.is_some() {
+                    error = true;
+                }
+                if let Ok(x) = result {
+                    density = Some(x);
+                }
+            } else if valid_non_negative_integer.is_ok() && has_h {
+                let result = valid_non_negative_integer;
+                error = result.is_err();
+                if density.is_some() || future_compat_h.is_some() {
+                    error = true;
+                }
+                if let Ok(h) = result {
+                    future_compat_h = Some(h);
+                }
+            } else {
+                error = true;
+            }
+        }
+        if future_compat_h.is_some() && width.is_none() {
+            error = true;
+        }
+        if !error {
+            let descriptor = Descriptor { wid: width, den: density };
+            let image_source = ImageSource { url: url, descriptor: descriptor };
+            candidates.push(image_source);
+        }
+    }
+    candidates
 }

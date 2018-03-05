@@ -16,7 +16,6 @@ use ipc_channel::ipc;
 use net_traits::{CoreResourceMsg, IpcSend};
 use net_traits::blob_url_store::{BlobBuf, get_blob_origin};
 use net_traits::filemanager_thread::{FileManagerThreadMsg, ReadFileProgress, RelativePos};
-use std::ascii::AsciiExt;
 use std::mem;
 use std::ops::Index;
 use std::path::PathBuf;
@@ -69,7 +68,7 @@ impl BlobImpl {
 #[dom_struct]
 pub struct Blob {
     reflector_: Reflector,
-    #[ignore_heap_size_of = "No clear owner"]
+    #[ignore_malloc_size_of = "No clear owner"]
     blob_impl: DomRefCell<BlobImpl>,
     /// content-type string
     type_string: String,
@@ -80,7 +79,7 @@ impl Blob {
     pub fn new(
             global: &GlobalScope, blob_impl: BlobImpl, typeString: String)
             -> DomRoot<Blob> {
-        let boxed_blob = box Blob::new_inherited(blob_impl, typeString);
+        let boxed_blob = Box::new(Blob::new_inherited(blob_impl, typeString));
         reflect_dom_object(boxed_blob, global, BlobBinding::Wrap)
     }
 
@@ -329,7 +328,7 @@ fn read_file(global: &GlobalScope, id: Uuid) -> Result<Vec<u8>, ()> {
 }
 
 /// Extract bytes from BlobParts, used by Blob and File constructor
-/// https://w3c.github.io/FileAPI/#constructorBlob
+/// <https://w3c.github.io/FileAPI/#constructorBlob>
 pub fn blob_parts_to_bytes(blobparts: Vec<BlobOrString>) -> Result<Vec<u8>, ()> {
     let mut ret = vec![];
 
@@ -376,7 +375,7 @@ impl BlobMethods for Blob {
 }
 
 /// Get the normalized, MIME-parsable type string
-/// https://w3c.github.io/FileAPI/#dfn-type
+/// <https://w3c.github.io/FileAPI/#dfn-type>
 /// XXX: We will relax the restriction here,
 /// since the spec has some problem over this part.
 /// see https://github.com/w3c/FileAPI/issues/43

@@ -24,23 +24,20 @@
 //! originating `DomRoot<T>`.
 //!
 
-use core::nonzero::NonZero;
 use dom::bindings::conversions::DerivedFrom;
 use dom::bindings::inheritance::Castable;
 use dom::bindings::reflector::{DomObject, Reflector};
 use dom::bindings::trace::JSTraceable;
 use dom::bindings::trace::trace_reflector;
 use dom::node::Node;
-use heapsize::HeapSizeOf;
 use js::jsapi::{JSObject, JSTracer, Heap};
 use js::rust::GCMethods;
+use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use mitochondria::OnceCell;
 use script_layout_interface::TrustedNodeAddress;
 use std::cell::{Cell, UnsafeCell};
 use std::default::Default;
 use std::hash::{Hash, Hasher};
-#[cfg(debug_assertions)]
-use std::intrinsics::type_name;
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::Deref;
@@ -159,12 +156,12 @@ impl<T: DomObject> DomRoot<T> {
     }
 }
 
-impl<T> HeapSizeOf for DomRoot<T>
+impl<T> MallocSizeOf for DomRoot<T>
 where
-    T: DomObject + HeapSizeOf,
+    T: DomObject + MallocSizeOf,
 {
-    fn heap_size_of_children(&self) -> usize {
-        (**self).heap_size_of_children()
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        (**self).size_of(ops)
     }
 }
 
@@ -314,13 +311,13 @@ impl<'root, T: RootedReference<'root> + 'root> RootedReference<'root> for Option
 /// This should only be used as a field in other DOM objects.
 #[must_root]
 pub struct Dom<T> {
-    ptr: NonZero<*const T>,
+    ptr: ptr::NonNull<T>,
 }
 
 // Dom<T> is similar to Rc<T>, in that it's not always clear how to avoid double-counting.
 // For now, we choose not to follow any such pointers.
-impl<T> HeapSizeOf for Dom<T> {
-    fn heap_size_of_children(&self) -> usize {
+impl<T> MallocSizeOf for Dom<T> {
+    fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
         0
     }
 }
@@ -341,7 +338,7 @@ impl<T: DomObject> Dom<T> {
     pub fn from_ref(obj: &T) -> Dom<T> {
         debug_assert!(thread_state::get().is_script());
         Dom {
-            ptr: unsafe { NonZero::new_unchecked(&*obj) },
+            ptr: ptr::NonNull::from(obj),
         }
     }
 }
@@ -353,22 +350,22 @@ impl<T: DomObject> Deref for Dom<T> {
         debug_assert!(thread_state::get().is_script());
         // We can only have &Dom<T> from a rooted thing, so it's safe to deref
         // it to &T.
-        unsafe { &*self.ptr.get() }
+        unsafe { &*self.ptr.as_ptr() }
     }
 }
 
 unsafe impl<T: DomObject> JSTraceable for Dom<T> {
     unsafe fn trace(&self, trc: *mut JSTracer) {
-        #[cfg(debug_assertions)]
-        let trace_str = format!("for {} on heap", type_name::<T>());
-        #[cfg(debug_assertions)]
+        #[cfg(all(feature = "unstable", debug_assertions))]
+        let trace_str = format!("for {} on heap", ::std::intrinsics::type_name::<T>());
+        #[cfg(all(feature = "unstable", debug_assertions))]
         let trace_info = &trace_str[..];
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(all(feature = "unstable", debug_assertions)))]
         let trace_info = "for DOM object on heap";
 
         trace_reflector(trc,
                         trace_info,
-                        (*self.ptr.get()).reflector());
+                        (*self.ptr.as_ptr()).reflector());
     }
 }
 
@@ -376,7 +373,7 @@ unsafe impl<T: DomObject> JSTraceable for Dom<T> {
 /// traits must be implemented on this.
 #[allow_unrooted_interior]
 pub struct LayoutDom<T> {
-    ptr: NonZero<*const T>,
+    ptr: ptr::NonNull<T>,
 }
 
 impl<T: Castable> LayoutDom<T> {
@@ -386,9 +383,9 @@ impl<T: Castable> LayoutDom<T> {
               T: DerivedFrom<U>
     {
         debug_assert!(thread_state::get().is_layout());
-        let ptr: *const T = self.ptr.get();
+        let ptr: *mut T = self.ptr.as_ptr();
         LayoutDom {
-            ptr: unsafe { NonZero::new_unchecked(ptr as *const U) },
+            ptr: unsafe { ptr::NonNull::new_unchecked(ptr as *mut U) },
         }
     }
 
@@ -399,9 +396,9 @@ impl<T: Castable> LayoutDom<T> {
         debug_assert!(thread_state::get().is_layout());
         unsafe {
             if (*self.unsafe_get()).is::<U>() {
-                let ptr: *const T = self.ptr.get();
+                let ptr: *mut T = self.ptr.as_ptr();
                 Some(LayoutDom {
-                    ptr: NonZero::new_unchecked(ptr as *const U),
+                    ptr: ptr::NonNull::new_unchecked(ptr as *mut U),
                 })
             } else {
                 None
@@ -414,7 +411,7 @@ impl<T: DomObject> LayoutDom<T> {
     /// Get the reflector.
     pub unsafe fn get_jsobject(&self) -> *mut JSObject {
         debug_assert!(thread_state::get().is_layout());
-        (*self.ptr.get()).reflector().get_jsobject().get()
+        (*self.ptr.as_ptr()).reflector().get_jsobject().get()
     }
 }
 
@@ -422,7 +419,7 @@ impl<T> Copy for LayoutDom<T> {}
 
 impl<T> PartialEq for Dom<T> {
     fn eq(&self, other: &Dom<T>) -> bool {
-        self.ptr == other.ptr
+        self.ptr.as_ptr() == other.ptr.as_ptr()
     }
 }
 
@@ -430,7 +427,7 @@ impl<T> Eq for Dom<T> {}
 
 impl<T> PartialEq for LayoutDom<T> {
     fn eq(&self, other: &LayoutDom<T>) -> bool {
-        self.ptr == other.ptr
+        self.ptr.as_ptr() == other.ptr.as_ptr()
     }
 }
 
@@ -438,13 +435,13 @@ impl<T> Eq for LayoutDom<T> {}
 
 impl<T> Hash for Dom<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.ptr.hash(state)
+        self.ptr.as_ptr().hash(state)
     }
 }
 
 impl<T> Hash for LayoutDom<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.ptr.hash(state)
+        self.ptr.as_ptr().hash(state)
     }
 }
 
@@ -476,7 +473,7 @@ impl LayoutDom<Node> {
         debug_assert!(thread_state::get().is_layout());
         let TrustedNodeAddress(addr) = inner;
         LayoutDom {
-            ptr: NonZero::new_unchecked(addr as *const Node),
+            ptr: ptr::NonNull::new_unchecked(addr as *const Node as *mut Node),
         }
     }
 }
@@ -518,9 +515,9 @@ impl<T: DomObject> MutDom<T> {
     }
 }
 
-impl<T: DomObject> HeapSizeOf for MutDom<T> {
-    fn heap_size_of_children(&self) -> usize {
-        // See comment on HeapSizeOf for Dom<T>.
+impl<T: DomObject> MallocSizeOf for MutDom<T> {
+    fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
+        // See comment on MallocSizeOf for Dom<T>.
         0
     }
 }
@@ -637,9 +634,9 @@ impl<T: DomObject> Default for MutNullableDom<T> {
     }
 }
 
-impl<T: DomObject> HeapSizeOf for MutNullableDom<T> {
-    fn heap_size_of_children(&self) -> usize {
-        // See comment on HeapSizeOf for Dom<T>.
+impl<T: DomObject> MallocSizeOf for MutNullableDom<T> {
+    fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
+        // See comment on MallocSizeOf for Dom<T>.
         0
     }
 }
@@ -680,9 +677,9 @@ impl<T: DomObject> Default for DomOnceCell<T> {
     }
 }
 
-impl<T: DomObject> HeapSizeOf for DomOnceCell<T> {
-    fn heap_size_of_children(&self) -> usize {
-        // See comment on HeapSizeOf for Dom<T>.
+impl<T: DomObject> MallocSizeOf for DomOnceCell<T> {
+    fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
+        // See comment on MallocSizeOf for Dom<T>.
         0
     }
 }
@@ -702,7 +699,7 @@ impl<T: DomObject> LayoutDom<T> {
     /// this is unsafe is what necessitates the layout wrappers.)
     pub unsafe fn unsafe_get(&self) -> *const T {
         debug_assert!(thread_state::get().is_layout());
-        self.ptr.get()
+        self.ptr.as_ptr()
     }
 
     /// Returns a reference to the interior of this JS object. This method is
@@ -710,11 +707,11 @@ impl<T: DomObject> LayoutDom<T> {
     /// mutate DOM nodes.
     pub fn get_for_script(&self) -> &T {
         debug_assert!(thread_state::get().is_script());
-        unsafe { &*self.ptr.get() }
+        unsafe { &*self.ptr.as_ptr() }
     }
 }
 
-/// Helper trait for safer manipulations of Option<Heap<T>> values.
+/// Helper trait for safer manipulations of `Option<Heap<T>>` values.
 pub trait OptionalHeapSetter {
     type Value;
     /// Update this optional heap value with a new value.

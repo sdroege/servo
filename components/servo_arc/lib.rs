@@ -8,7 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Fork of Arc for Servo. This has the following advantages over std::Arc:
+//! Fork of Arc for Servo. This has the following advantages over std::sync::Arc:
+//!
 //! * We don't waste storage on the weak reference count.
 //! * We don't do extra RMU operations to handle the possibility of weak references.
 //! * We can experiment with arena allocation (todo).
@@ -16,7 +17,7 @@
 //! * We have support for dynamically-sized types (see from_header_and_iter).
 //! * We have support for thin arcs to unsized types (see ThinArc).
 //!
-//! [1] https://bugzilla.mozilla.org/show_bug.cgi?id=1360883
+//! [1]: https://bugzilla.mozilla.org/show_bug.cgi?id=1360883
 
 // The semantics of Arc are alread documented in the Rust docs, so we don't
 // duplicate those here.
@@ -26,8 +27,6 @@ extern crate nodrop;
 #[cfg(feature = "servo")] extern crate serde;
 extern crate stable_deref_trait;
 
-#[cfg(feature = "servo")]
-use heapsize::HeapSizeOf;
 use nodrop::NoDrop;
 #[cfg(feature = "servo")]
 use serde::{Deserialize, Serialize};
@@ -83,7 +82,8 @@ const MAX_REFCOUNT: usize = (isize::MAX) as usize;
 /// be thin or fat (which depends on whether or not T is sized). Given
 /// that this is all a temporary hack, this restriction is fine for now.
 ///
-/// [1] https://github.com/rust-lang/rust/issues/27730
+/// [1]: https://github.com/rust-lang/rust/issues/27730
+// FIXME: remove this and use std::ptr::NonNull when Firefox requires Rust 1.25+
 pub struct NonZeroPtrMut<T: ?Sized + 'static>(&'static mut T);
 impl<T: ?Sized> NonZeroPtrMut<T> {
     pub fn new(ptr: *mut T) -> Self {
@@ -128,6 +128,7 @@ impl<T: Sized + 'static> Hash for NonZeroPtrMut<T> {
     }
 }
 
+#[repr(C)]
 pub struct Arc<T: ?Sized + 'static> {
     p: NonZeroPtrMut<ArcInner<T>>,
 }
@@ -169,6 +170,7 @@ impl<T> DerefMut for UniqueArc<T> {
 unsafe impl<T: ?Sized + Sync + Send> Send for Arc<T> {}
 unsafe impl<T: ?Sized + Sync + Send> Sync for Arc<T> {}
 
+#[repr(C)]
 struct ArcInner<T: ?Sized> {
     count: atomic::AtomicUsize,
     data: T,
@@ -187,13 +189,15 @@ impl<T> Arc<T> {
         Arc { p: NonZeroPtrMut::new(Box::into_raw(x)) }
     }
 
+    #[inline]
     pub fn into_raw(this: Self) -> *const T {
         let ptr = unsafe { &((*this.ptr()).data) as *const _ };
         mem::forget(this);
         ptr
     }
 
-    pub unsafe fn from_raw(ptr: *const T) -> Self {
+    #[inline]
+    unsafe fn from_raw(ptr: *const T) -> Self {
         // To find the corresponding pointer to the `ArcInner` we need
         // to subtract the offset of the `data` field from the pointer.
         let ptr = (ptr as *const u8).offset(-offset_of!(ArcInner<T>, data));
@@ -204,6 +208,7 @@ impl<T> Arc<T> {
 
     /// Produce a pointer to the data that can be converted back
     /// to an arc
+    #[inline]
     pub fn borrow_arc<'a>(&'a self) -> ArcBorrow<'a, T> {
         ArcBorrow(&**self)
     }
@@ -389,11 +394,11 @@ impl<T: ?Sized> Drop for Arc<T> {
 
 impl<T: ?Sized + PartialEq> PartialEq for Arc<T> {
     fn eq(&self, other: &Arc<T>) -> bool {
-        *(*self) == *(*other)
+        Self::ptr_eq(self, other) || *(*self) == *(*other)
     }
 
     fn ne(&self, other: &Arc<T>) -> bool {
-        *(*self) != *(*other)
+        !Self::ptr_eq(self, other) && *(*self) != *(*other)
     }
 }
 impl<T: ?Sized + PartialOrd> PartialOrd for Arc<T> {
@@ -455,18 +460,21 @@ impl<T: ?Sized + Hash> Hash for Arc<T> {
 }
 
 impl<T> From<T> for Arc<T> {
+    #[inline]
     fn from(t: T) -> Self {
         Arc::new(t)
     }
 }
 
 impl<T: ?Sized> borrow::Borrow<T> for Arc<T> {
+    #[inline]
     fn borrow(&self) -> &T {
         &**self
     }
 }
 
 impl<T: ?Sized> AsRef<T> for Arc<T> {
+    #[inline]
     fn as_ref(&self) -> &T {
         &**self
     }
@@ -474,15 +482,6 @@ impl<T: ?Sized> AsRef<T> for Arc<T> {
 
 unsafe impl<T: ?Sized> StableDeref for Arc<T> {}
 unsafe impl<T: ?Sized> CloneStableDeref for Arc<T> {}
-
-// This is what the HeapSize crate does for regular arc, but is questionably
-// sound. See https://github.com/servo/heapsize/issues/37
-#[cfg(feature = "servo")]
-impl<T: HeapSizeOf> HeapSizeOf for Arc<T> {
-    fn heap_size_of_children(&self) -> usize {
-        (**self).heap_size_of_children()
-    }
-}
 
 #[cfg(feature = "servo")]
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Arc<T>
@@ -530,7 +529,7 @@ impl<H, T> Arc<HeaderSlice<H, [T]>> {
         where I: Iterator<Item=T> + ExactSizeIterator
     {
         use ::std::mem::size_of;
-        assert!(size_of::<T>() != 0, "Need to think about ZST");
+        assert_ne!(size_of::<T>(), 0, "Need to think about ZST");
 
         // Compute the required size for the allocation.
         let num_items = items.len();
@@ -599,7 +598,7 @@ impl<H, T> Arc<HeaderSlice<H, [T]>> {
             assert!(items.next().is_none(), "ExactSizeIterator under-reported length");
 
             // We should have consumed the buffer exactly.
-            debug_assert!(current as *mut u8 == buffer.offset(size as isize));
+            debug_assert_eq!(current as *mut u8, buffer.offset(size as isize));
         }
 
         // Return the fat Arc.
@@ -662,7 +661,7 @@ fn thin_to_thick<H, T>(thin: *mut ArcInner<HeaderSliceWithLength<H, [T; 1]>>)
 impl<H: 'static, T: 'static> ThinArc<H, T> {
     /// Temporarily converts |self| into a bonafide Arc and exposes it to the
     /// provided callback. The refcount is not modified.
-    #[inline(always)]
+    #[inline]
     pub fn with_arc<F, U>(&self, f: F) -> U
         where F: FnOnce(&Arc<HeaderSliceWithLength<H, [T]>>) -> U
     {
@@ -685,6 +684,7 @@ impl<H: 'static, T: 'static> ThinArc<H, T> {
 
     /// Returns the address on the heap of the ThinArc itself -- not the T
     /// within it -- for memory reporting.
+    #[inline]
     pub fn heap_ptr(&self) -> *const c_void {
         self.ptr as *const ArcInner<T> as *const c_void
     }
@@ -692,18 +692,22 @@ impl<H: 'static, T: 'static> ThinArc<H, T> {
 
 impl<H, T> Deref for ThinArc<H, T> {
     type Target = HeaderSliceWithLength<H, [T]>;
+
+    #[inline]
     fn deref(&self) -> &Self::Target {
         unsafe { &(*thin_to_thick(self.ptr)).data }
     }
 }
 
 impl<H: 'static, T: 'static> Clone for ThinArc<H, T> {
+    #[inline]
     fn clone(&self) -> Self {
         ThinArc::with_arc(self, |a| Arc::into_thin(a.clone()))
     }
 }
 
 impl<H: 'static, T: 'static> Drop for ThinArc<H, T> {
+    #[inline]
     fn drop(&mut self) {
         let _ = Arc::from_thin(ThinArc { ptr: self.ptr });
     }
@@ -712,8 +716,9 @@ impl<H: 'static, T: 'static> Drop for ThinArc<H, T> {
 impl<H: 'static, T: 'static> Arc<HeaderSliceWithLength<H, [T]>> {
     /// Converts an Arc into a ThinArc. This consumes the Arc, so the refcount
     /// is not modified.
+    #[inline]
     pub fn into_thin(a: Self) -> ThinArc<H, T> {
-        assert!(a.header.length == a.slice.len(),
+        assert_eq!(a.header.length, a.slice.len(),
                 "Length needs to be correct for ThinArc to work");
         let fat_ptr: *mut ArcInner<HeaderSliceWithLength<H, [T]>> = a.ptr();
         mem::forget(a);
@@ -725,6 +730,7 @@ impl<H: 'static, T: 'static> Arc<HeaderSliceWithLength<H, [T]>> {
 
     /// Converts a ThinArc into an Arc. This consumes the ThinArc, so the refcount
     /// is not modified.
+    #[inline]
     pub fn from_thin(a: ThinArc<H, T>) -> Self {
         let ptr = thin_to_thick(a.ptr);
         mem::forget(a);
@@ -735,6 +741,7 @@ impl<H: 'static, T: 'static> Arc<HeaderSliceWithLength<H, [T]>> {
 }
 
 impl<H: PartialEq + 'static, T: PartialEq + 'static> PartialEq for ThinArc<H, T> {
+    #[inline]
     fn eq(&self, other: &ThinArc<H, T>) -> bool {
         ThinArc::with_arc(self, |a| {
             ThinArc::with_arc(other, |b| {
@@ -762,6 +769,7 @@ impl<H: Eq + 'static, T: Eq + 'static> Eq for ThinArc<H, T> {}
 /// its contained data (and can be read from by both C++ and Rust),
 /// but we can also convert it to a "regular" Arc<T> by removing the offset
 #[derive(Eq)]
+#[repr(C)]
 pub struct RawOffsetArc<T: 'static> {
     ptr: NonZeroPtrMut<T>,
 }
@@ -777,6 +785,7 @@ impl<T: 'static> Deref for RawOffsetArc<T> {
 }
 
 impl<T: 'static> Clone for RawOffsetArc<T> {
+    #[inline]
     fn clone(&self) -> Self {
         Arc::into_raw_offset(self.clone_arc())
     }
@@ -808,7 +817,7 @@ impl<T: PartialEq> PartialEq for RawOffsetArc<T> {
 impl<T: 'static> RawOffsetArc<T> {
     /// Temporarily converts |self| into a bonafide Arc and exposes it to the
     /// provided callback. The refcount is not modified.
-    #[inline(always)]
+    #[inline]
     pub fn with_arc<F, U>(&self, f: F) -> U
         where F: FnOnce(&Arc<T>) -> U
     {
@@ -829,6 +838,7 @@ impl<T: 'static> RawOffsetArc<T> {
 
     /// If uniquely owned, provide a mutable reference
     /// Else create a copy, and mutate that
+    #[inline]
     pub fn make_mut(&mut self) -> &mut T where T: Clone {
         unsafe {
             // extract the RawOffsetArc as an owned variable
@@ -846,12 +856,14 @@ impl<T: 'static> RawOffsetArc<T> {
     }
 
     /// Clone it as an Arc
+    #[inline]
     pub fn clone_arc(&self) -> Arc<T> {
         RawOffsetArc::with_arc(self, |a| a.clone())
     }
 
     /// Produce a pointer to the data that can be converted back
     /// to an arc
+    #[inline]
     pub fn borrow_arc<'a>(&'a self) -> ArcBorrow<'a, T> {
         ArcBorrow(&**self)
     }
@@ -896,12 +908,14 @@ pub struct ArcBorrow<'a, T: 'a>(&'a T);
 
 impl<'a, T> Copy for ArcBorrow<'a, T> {}
 impl<'a, T> Clone for ArcBorrow<'a, T> {
+    #[inline]
     fn clone(&self) -> Self {
         *self
     }
 }
 
 impl<'a, T> ArcBorrow<'a, T> {
+    #[inline]
     pub fn clone_arc(&self) -> Arc<T> {
         let arc = unsafe { Arc::from_raw(self.0) };
         // addref it!
@@ -911,10 +925,12 @@ impl<'a, T> ArcBorrow<'a, T> {
 
     /// For constructing from a reference known to be Arc-backed,
     /// e.g. if we obtain such a reference over FFI
+    #[inline]
     pub unsafe fn from_ref(r: &'a T) -> Self {
         ArcBorrow(r)
     }
 
+    #[inline]
     pub fn with_arc<F, U>(&self, f: F) -> U where F: FnOnce(&Arc<T>) -> U, T: 'static {
         // Synthesize transient Arc, which never touches the refcount.
         let transient = unsafe { NoDrop::new(Arc::from_raw(self.0)) };
@@ -934,6 +950,8 @@ impl<'a, T> ArcBorrow<'a, T> {
 
 impl<'a, T> Deref for ArcBorrow<'a, T> {
     type Target = T;
+
+    #[inline]
     fn deref(&self) -> &T {
         &*self.0
     }
@@ -969,6 +987,6 @@ mod tests {
             let _ = x == x;
             Arc::from_thin(x.clone());
         }
-        assert!(canary.load(Acquire) == 1);
+        assert_eq!(canary.load(Acquire), 1);
     }
 }

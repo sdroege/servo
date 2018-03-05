@@ -9,8 +9,8 @@
 use app_units::Au;
 use block::{BlockFlow, ISizeAndMarginsComputer};
 use context::LayoutContext;
-use display_list_builder::{BlockFlowDisplayListBuilding, DisplayListBuildState};
-use display_list_builder::{NEVER_CREATES_CONTAINING_BLOCK, StackingContextCollectionState};
+use display_list::{BlockFlowDisplayListBuilding, DisplayListBuildState};
+use display_list::{StackingContextCollectionFlags, StackingContextCollectionState};
 use euclid::Point2D;
 use flow::{Flow, FlowClass, OpaqueFlow};
 use fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
@@ -24,7 +24,11 @@ use style::logical_geometry::LogicalSize;
 use style::properties::ComputedValues;
 use table::{ColumnIntrinsicInlineSize, InternalTable, TableLikeFlow};
 
+#[allow(unsafe_code)]
+unsafe impl ::flow::HasBaseFlow for TableRowGroupFlow {}
+
 /// A table formatting context.
+#[repr(C)]
 pub struct TableRowGroupFlow {
     /// Fields common to all block flows.
     pub block_flow: BlockFlow,
@@ -127,9 +131,7 @@ impl Flow for TableRowGroupFlow {
         let content_inline_size = containing_block_inline_size;
 
         let border_collapse = self.block_flow.fragment.style.get_inheritedtable().border_collapse;
-        let inline_size_computer = InternalTable {
-            border_collapse: border_collapse,
-        };
+        let inline_size_computer = InternalTable;
         inline_size_computer.compute_used_inline_size(&mut self.block_flow,
                                                       shared_context,
                                                       containing_block_inline_size);
@@ -148,7 +150,7 @@ impl Flow for TableRowGroupFlow {
                                                                     _writing_mode,
                                                                     _inline_start_margin_edge,
                                                                     _inline_end_margin_edge| {
-            if border_collapse == border_collapse::T::collapse {
+            if border_collapse == border_collapse::T::Collapse {
                 let child_table_row = child_flow.as_mut_table_row();
                 child_table_row.populate_collapsed_border_spacing(
                     collapsed_inline_direction_border_widths_for_table,
@@ -157,9 +159,9 @@ impl Flow for TableRowGroupFlow {
         });
     }
 
-    fn assign_block_size(&mut self, _: &LayoutContext) {
+    fn assign_block_size(&mut self, lc: &LayoutContext) {
         debug!("assign_block_size: assigning block_size for table_rowgroup");
-        self.block_flow.assign_block_size_for_table_like_flow(self.spacing.vertical());
+        self.block_flow.assign_block_size_for_table_like_flow(self.spacing.vertical(), lc);
     }
 
     fn compute_stacking_relative_position(&mut self, layout_context: &LayoutContext) {
@@ -174,13 +176,17 @@ impl Flow for TableRowGroupFlow {
         self.block_flow.update_late_computed_block_position_if_necessary(block_position)
     }
 
-    fn build_display_list(&mut self, state: &mut DisplayListBuildState) {
-        debug!("build_display_list_table_rowgroup: same process as block flow");
-        self.block_flow.build_display_list(state);
+    fn build_display_list(&mut self, _: &mut DisplayListBuildState) {
+        use style::servo::restyle_damage::ServoRestyleDamage;
+
+        // we skip setting the damage in TableCellStyleInfo::build_display_list()
+        // because we only have immutable access
+        self.block_flow.fragment.restyle_damage.remove(ServoRestyleDamage::REPAINT);
     }
 
     fn collect_stacking_contexts(&mut self, state: &mut StackingContextCollectionState) {
-        self.block_flow.collect_stacking_contexts_for_block(state, NEVER_CREATES_CONTAINING_BLOCK);
+        self.block_flow.collect_stacking_contexts_for_block(state,
+            StackingContextCollectionFlags::NEVER_CREATES_CONTAINING_BLOCK);
     }
 
     fn repair_style(&mut self, new_style: &::ServoArc<ComputedValues>) {

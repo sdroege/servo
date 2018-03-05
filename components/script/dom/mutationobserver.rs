@@ -9,7 +9,7 @@ use dom::bindings::codegen::Bindings::MutationObserverBinding::MutationCallback;
 use dom::bindings::codegen::Bindings::MutationObserverBinding::MutationObserverBinding::MutationObserverMethods;
 use dom::bindings::codegen::Bindings::MutationObserverBinding::MutationObserverInit;
 use dom::bindings::error::{Error, Fallible};
-use dom::bindings::reflector::{Reflector, reflect_dom_object};
+use dom::bindings::reflector::{Reflector, reflect_dom_object, DomObject};
 use dom::bindings::root::DomRoot;
 use dom::bindings::str::DOMString;
 use dom::mutationrecord::MutationRecord;
@@ -24,7 +24,7 @@ use std::rc::Rc;
 #[dom_struct]
 pub struct MutationObserver {
     reflector_: Reflector,
-    #[ignore_heap_size_of = "can't measure Rc values"]
+    #[ignore_malloc_size_of = "can't measure Rc values"]
     callback: Rc<MutationCallback>,
     record_queue: DomRefCell<Vec<DomRoot<MutationRecord>>>,
 }
@@ -35,13 +35,13 @@ pub enum Mutation<'a> {
                 prev: Option<&'a Node>, next: Option<&'a Node> },
 }
 
-#[derive(HeapSizeOf, JSTraceable)]
+#[derive(JSTraceable, MallocSizeOf)]
 pub struct RegisteredObserver {
     observer: DomRoot<MutationObserver>,
     options: ObserverOptions,
 }
 
-#[derive(HeapSizeOf, JSTraceable)]
+#[derive(JSTraceable, MallocSizeOf)]
 pub struct ObserverOptions {
     attribute_old_value: bool,
     attributes: bool,
@@ -54,7 +54,7 @@ pub struct ObserverOptions {
 
 impl MutationObserver {
     fn new(global: &Window, callback: Rc<MutationCallback>) -> DomRoot<MutationObserver> {
-        let boxed_observer = box MutationObserver::new_inherited(callback);
+        let boxed_observer = Box::new(MutationObserver::new_inherited(callback));
         reflect_dom_object(boxed_observer, global, MutationObserverBinding::Wrap)
     }
 
@@ -67,12 +67,13 @@ impl MutationObserver {
     }
 
     pub fn Constructor(global: &Window, callback: Rc<MutationCallback>) -> Fallible<DomRoot<MutationObserver>> {
+        global.set_exists_mut_observer();
         let observer = MutationObserver::new(global, callback);
         ScriptThread::add_mutation_observer(&*observer);
         Ok(observer)
     }
 
-    /// https://dom.spec.whatwg.org/#queue-a-mutation-observer-compound-microtask
+    /// <https://dom.spec.whatwg.org/#queue-a-mutation-observer-compound-microtask>
     pub fn queue_mutation_observer_compound_microtask() {
         // Step 1
         if ScriptThread::is_mutation_observer_compound_microtask_queued() {
@@ -84,7 +85,7 @@ impl MutationObserver {
         ScriptThread::enqueue_microtask(Microtask::NotifyMutationObservers);
     }
 
-    /// https://dom.spec.whatwg.org/#notify-mutation-observers
+    /// <https://dom.spec.whatwg.org/#notify-mutation-observers>
     pub fn notify_mutation_observers() {
         // Step 1
         ScriptThread::set_mutation_observer_compound_microtask_queued(false);
@@ -103,8 +104,11 @@ impl MutationObserver {
         // TODO: Step 6 (slot signals)
     }
 
-    /// https://dom.spec.whatwg.org/#queueing-a-mutation-record
+    /// <https://dom.spec.whatwg.org/#queueing-a-mutation-record>
     pub fn queue_a_mutation_record(target: &Node, attr_type: Mutation) {
+        if !target.global().as_window().get_exists_mut_observer() {
+            return;
+        }
         // Step 1
         let mut interestedObservers: Vec<(DomRoot<MutationObserver>, Option<DOMString>)> = vec![];
         // Step 2 & 3
@@ -182,7 +186,7 @@ impl MutationObserver {
 }
 
 impl MutationObserverMethods for MutationObserver {
-    /// https://dom.spec.whatwg.org/#dom-mutationobserver-observe
+    /// <https://dom.spec.whatwg.org/#dom-mutationobserver-observe>
     fn Observe(&self, target: &Node, options: &MutationObserverInit) -> Fallible<()> {
         let attribute_filter = options.attributeFilter.clone().unwrap_or(vec![]);
         let attribute_old_value = options.attributeOldValue.unwrap_or(false);

@@ -71,7 +71,7 @@ use bluetooth::BluetoothThreadFactory;
 use bluetooth_traits::BluetoothRequest;
 use canvas::gl_context::GLContextFactory;
 use canvas::webgl_thread::WebGLThreads;
-use compositing::{IOCompositor, ShutdownState};
+use compositing::{IOCompositor, ShutdownState, RenderNotifier};
 use compositing::compositor_thread::{self, CompositorProxy, CompositorReceiver, InitialCompositorState};
 use compositing::compositor_thread::{EmbedderMsg, EmbedderProxy, EmbedderReceiver};
 use compositing::windowing::WindowEvent;
@@ -183,14 +183,15 @@ impl<Window> Servo<Window> where Window: WindowMethods + 'static {
             };
 
             let mut debug_flags = webrender::DebugFlags::empty();
-            debug_flags.set(webrender::PROFILER_DBG, opts.webrender_stats);
+            debug_flags.set(webrender::DebugFlags::PROFILER_DBG, opts.webrender_stats);
 
-            webrender::Renderer::new(window.gl(), webrender::RendererOptions {
+            let render_notifier = Box::new(RenderNotifier::new(compositor_proxy.clone()));
+
+            webrender::Renderer::new(window.gl(), render_notifier, webrender::RendererOptions {
                 device_pixel_ratio: device_pixel_ratio,
                 resource_override_path: Some(resource_path),
                 enable_aa: opts.enable_text_antialiasing,
                 debug_flags: debug_flags,
-                enable_batcher: opts.webrender_batch,
                 debug: opts.webrender_debug,
                 recorder: recorder,
                 precache_shaders: opts.precache_shaders,
@@ -202,7 +203,8 @@ impl<Window> Servo<Window> where Window: WindowMethods + 'static {
         };
 
         let webrender_api = webrender_api_sender.create_api();
-        let webrender_document = webrender_api.add_document(window.framebuffer_size());
+        let wr_document_layer = 0; //TODO
+        let webrender_document = webrender_api.add_document(window.framebuffer_size(), wr_document_layer);
 
         // Important that this call is done in a single-threaded fashion, we
         // can't defer it after `create_constellation` has started.
@@ -263,8 +265,8 @@ impl<Window> Servo<Window> where Window: WindowMethods + 'static {
                 self.compositor.composite();
             }
 
-            WindowEvent::Resize(size) => {
-                self.compositor.on_resize_window_event(size);
+            WindowEvent::Resize => {
+                self.compositor.on_resize_window_event();
             }
 
             WindowEvent::LoadUrl(top_level_browsing_context_id, url) => {
@@ -307,10 +309,6 @@ impl<Window> Servo<Window> where Window: WindowMethods + 'static {
                 if let Err(e) = self.constellation_chan.send(msg) {
                     warn!("Sending navigation to constellation failed ({}).", e);
                 }
-            }
-
-            WindowEvent::TouchpadPressure(cursor, pressure, stage) => {
-                self.compositor.on_touchpad_pressure_event(cursor, pressure, stage);
             }
 
             WindowEvent::KeyEvent(ch, key, state, modifiers) => {
@@ -393,6 +391,22 @@ impl<Window> Servo<Window> where Window: WindowMethods + 'static {
                     }
                 },
 
+                (EmbedderMsg::GetScreenSize(top_level_browsing_context, send),
+                 ShutdownState::NotShuttingDown) => {
+                    let rect = self.compositor.window.screen_size(top_level_browsing_context);
+                    if let Err(e) = send.send(rect) {
+                        warn!("Sending response to get screen size failed ({}).", e);
+                    }
+                },
+
+                (EmbedderMsg::GetScreenAvailSize(top_level_browsing_context, send),
+                 ShutdownState::NotShuttingDown) => {
+                    let rect = self.compositor.window.screen_avail_size(top_level_browsing_context);
+                    if let Err(e) = send.send(rect) {
+                        warn!("Sending response to get screen available size failed ({}).", e);
+                    }
+                },
+
                 (EmbedderMsg::AllowNavigation(top_level_browsing_context,
                                               url,
                                               response_chan),
@@ -443,6 +457,11 @@ impl<Window> Servo<Window> where Window: WindowMethods + 'static {
                     // TODO(pcwalton): Specify which frame's load completed.
                     self.compositor.window.load_end(top_level_browsing_context);
                 },
+                (EmbedderMsg::Panic(top_level_browsing_context, reason, backtrace),
+                 ShutdownState::NotShuttingDown) => {
+                    self.compositor.window.handle_panic(top_level_browsing_context, reason, backtrace);
+                },
+
             }
         }
     }
@@ -553,12 +572,17 @@ fn create_constellation(user_agent: Cow<'static, str>,
     };
 
     // Initialize WebGL Thread entry point.
-    let (webgl_threads, image_handler) = WebGLThreads::new(gl_factory,
-                                                           window_gl,
-                                                           webrender_api_sender.clone(),
-                                                           webvr_compositor.map(|c| c as Box<_>));
+    let (webgl_threads, image_handler, output_handler) = WebGLThreads::new(gl_factory,
+                                                                           window_gl,
+                                                                           webrender_api_sender.clone(),
+                                                                           webvr_compositor.map(|c| c as Box<_>));
     // Set webrender external image handler for WebGL textures
     webrender.set_external_image_handler(image_handler);
+
+    // Set DOM to texture handler, if enabled.
+    if let Some(output_handler) = output_handler {
+        webrender.set_output_image_handler(output_handler);
+    }
 
     let initial_state = InitialConstellationState {
         compositor_proxy,
@@ -648,16 +672,6 @@ pub fn run_content_process(token: String) {
     unprivileged_content.start_all::<script_layout_interface::message::Msg,
                                      layout_thread::LayoutThread,
                                      script::script_thread::ScriptThread>(true);
-}
-
-// This is a workaround for https://github.com/rust-lang/rust/pull/30175 until
-// https://github.com/lfairy/rust-errno/pull/5 lands, and should be removed once
-// we update Servo with the rust-errno crate.
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub unsafe extern fn __errno_location() -> *mut i32 {
-    extern { fn __errno() -> *mut i32; }
-    __errno()
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_os = "ios")))]

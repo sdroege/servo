@@ -20,6 +20,7 @@ use dom::performanceobserver::PerformanceObserver as DOMPerformanceObserver;
 use dom::performancetiming::PerformanceTiming;
 use dom::window::Window;
 use dom_struct::dom_struct;
+use metrics::ToMs;
 use std::cell::Cell;
 use std::cmp::Ordering;
 use time;
@@ -50,7 +51,7 @@ const INVALID_ENTRY_NAMES: &'static [&'static str] = &[
 
 /// Implementation of a list of PerformanceEntry items shared by the
 /// Performance and PerformanceObserverEntryList interfaces implementations.
-#[derive(HeapSizeOf, JSTraceable)]
+#[derive(JSTraceable, MallocSizeOf)]
 pub struct PerformanceEntryList {
     entries: DOMPerformanceEntryList,
 }
@@ -101,7 +102,7 @@ impl IntoIterator for PerformanceEntryList {
     }
 }
 
-#[derive(HeapSizeOf, JSTraceable)]
+#[derive(JSTraceable, MallocSizeOf)]
 struct PerformanceObserver {
     observer: DomRoot<DOMPerformanceObserver>,
     entry_types: Vec<DOMString>,
@@ -114,13 +115,13 @@ pub struct Performance {
     entries: DomRefCell<PerformanceEntryList>,
     observers: DomRefCell<Vec<PerformanceObserver>>,
     pending_notification_observers_task: Cell<bool>,
-    navigation_start_precise: f64,
+    navigation_start_precise: u64,
 }
 
 impl Performance {
     fn new_inherited(global: &GlobalScope,
                      navigation_start: u64,
-                     navigation_start_precise: f64) -> Performance {
+                     navigation_start_precise: u64) -> Performance {
         Performance {
             reflector_: Reflector::new(),
             timing: if global.is::<Window>() {
@@ -139,12 +140,12 @@ impl Performance {
 
     pub fn new(global: &GlobalScope,
                navigation_start: u64,
-               navigation_start_precise: f64) -> DomRoot<Performance> {
-        reflect_dom_object(box Performance::new_inherited(global,
-                                                          navigation_start,
-                                                          navigation_start_precise),
-                           global,
-                           PerformanceBinding::Wrap)
+               navigation_start_precise: u64) -> DomRoot<Performance> {
+        reflect_dom_object(
+            Box::new(Performance::new_inherited(global, navigation_start, navigation_start_precise)),
+            global,
+            PerformanceBinding::Wrap
+        )
     }
 
     /// Add a PerformanceObserver to the list of observers with a set of
@@ -183,14 +184,6 @@ impl Performance {
             None => return,
         };
 
-        if self.pending_notification_observers_task.get() {
-            if let Some(o) = observers.iter().nth(index) {
-                DOMPerformanceObserver::new(&self.global(),
-                                            o.observer.callback(),
-                                            o.observer.entries()).notify();
-            }
-        }
-
         observers.remove(index);
     }
 
@@ -199,7 +192,7 @@ impl Performance {
     /// notify the observers if no other notification task is already queued.
     ///
     /// Algorithm spec:
-    /// https://w3c.github.io/performance-timeline/#queue-a-performanceentry
+    /// <https://w3c.github.io/performance-timeline/#queue-a-performanceentry>
     pub fn queue_entry(&self, entry: &PerformanceEntry,
                        add_to_performance_entries_buffer: bool) {
         // Steps 1-3.
@@ -233,7 +226,7 @@ impl Performance {
     /// Observers notifications task.
     ///
     /// Algorithm spec (step 7):
-    /// https://w3c.github.io/performance-timeline/#queue-a-performanceentry
+    /// <https://w3c.github.io/performance-timeline/#queue-a-performanceentry>
     pub fn notify_observers(&self) {
         // Step 7.1.
         self.pending_notification_observers_task.set(false);
@@ -260,7 +253,7 @@ impl Performance {
             Some(ref timing) => timing.navigation_start_precise(),
             None => self.navigation_start_precise,
         };
-        (time::precise_time_ns() as f64 - nav_start) / 1000000 as f64
+        (time::precise_time_ns() - nav_start).to_ms()
     }
 }
 

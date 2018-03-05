@@ -4,6 +4,7 @@
 
 // https://www.khronos.org/registry/webgl/specs/latest/1.0/webgl.idl
 use angle::hl::{BuiltInResources, Output, ShaderValidator};
+use canvas_traits::webgl::{WebGLSLVersion, WebGLVersion};
 use canvas_traits::webgl::{webgl_channel, WebGLCommand, WebGLMsgSender, WebGLParameter, WebGLResult, WebGLShaderId};
 use dom::bindings::cell::DomRefCell;
 use dom::bindings::codegen::Bindings::WebGLShaderBinding;
@@ -18,7 +19,7 @@ use dom_struct::dom_struct;
 use std::cell::Cell;
 use std::sync::{ONCE_INIT, Once};
 
-#[derive(Clone, Copy, Debug, HeapSizeOf, JSTraceable, PartialEq)]
+#[derive(Clone, Copy, Debug, JSTraceable, MallocSizeOf, PartialEq)]
 pub enum ShaderCompilationStatus {
     NotCompiled,
     Succeeded,
@@ -35,15 +36,9 @@ pub struct WebGLShader {
     is_deleted: Cell<bool>,
     attached_counter: Cell<u32>,
     compilation_status: Cell<ShaderCompilationStatus>,
-    #[ignore_heap_size_of = "Defined in ipc-channel"]
+    #[ignore_malloc_size_of = "Defined in ipc-channel"]
     renderer: WebGLMsgSender,
 }
-
-#[cfg(not(target_os = "android"))]
-const SHADER_OUTPUT_FORMAT: Output = Output::Glsl;
-
-#[cfg(target_os = "android")]
-const SHADER_OUTPUT_FORMAT: Output = Output::Essl;
 
 static GLSLANG_INITIALIZATION: Once = ONCE_INIT;
 
@@ -82,7 +77,7 @@ impl WebGLShader {
                id: WebGLShaderId,
                shader_type: u32)
                -> DomRoot<WebGLShader> {
-        reflect_dom_object(box WebGLShader::new_inherited(renderer, id, shader_type),
+        reflect_dom_object(Box::new(WebGLShader::new_inherited(renderer, id, shader_type)),
                            window,
                            WebGLShaderBinding::Wrap)
     }
@@ -99,7 +94,12 @@ impl WebGLShader {
     }
 
     /// glCompileShader
-    pub fn compile(&self, ext: &WebGLExtensions) {
+    pub fn compile(
+        &self,
+        webgl_version: WebGLVersion,
+        glsl_version: WebGLSLVersion,
+        ext: &WebGLExtensions
+    ) {
         if self.compilation_status.get() != ShaderCompilationStatus::NotCompiled {
             debug!("Compiling already compiled shader {}", self.id);
         }
@@ -108,9 +108,41 @@ impl WebGLShader {
             let mut params = BuiltInResources::default();
             params.FragmentPrecisionHigh = 1;
             params.OES_standard_derivatives = ext.is_enabled::<OESStandardDerivatives>() as i32;
-            let validator = ShaderValidator::for_webgl(self.gl_type,
-                                                       SHADER_OUTPUT_FORMAT,
-                                                       &params).unwrap();
+            let validator = match webgl_version {
+                WebGLVersion::WebGL1 => {
+                    let output_format = if cfg!(any(target_os = "android", target_os = "ios")) {
+                        Output::Essl
+                    } else {
+                        Output::Glsl
+                    };
+                    ShaderValidator::for_webgl(self.gl_type,
+                                               output_format,
+                                               &params).unwrap()
+                },
+                WebGLVersion::WebGL2 => {
+                    let output_format = if cfg!(any(target_os = "android", target_os = "ios")) {
+                        Output::Essl
+                    } else {
+                        match (glsl_version.major, glsl_version.minor) {
+                            (1, 30) => Output::Glsl130,
+                            (1, 40) => Output::Glsl140,
+                            (1, 50) => Output::Glsl150Core,
+                            (3, 30) => Output::Glsl330Core,
+                            (4, 0) => Output::Glsl400Core,
+                            (4, 10) => Output::Glsl410Core,
+                            (4, 20) => Output::Glsl420Core,
+                            (4, 30) => Output::Glsl430Core,
+                            (4, 40) => Output::Glsl440Core,
+                            (4, _) => Output::Glsl450Core,
+                            _ => Output::Glsl140
+                        }
+                    };
+                    ShaderValidator::for_webgl2(self.gl_type,
+                                               output_format,
+                                               &params).unwrap()
+                },
+            };
+
             match validator.compile_and_translate(&[source]) {
                 Ok(translated_source) => {
                     debug!("Shader translated: {}", translated_source);
@@ -192,7 +224,7 @@ impl WebGLShader {
 
 impl Drop for WebGLShader {
     fn drop(&mut self) {
-        assert!(self.attached_counter.get() == 0);
+        assert_eq!(self.attached_counter.get(), 0);
         self.delete();
     }
 }

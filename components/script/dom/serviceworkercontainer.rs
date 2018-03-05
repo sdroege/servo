@@ -16,7 +16,6 @@ use dom::serviceworker::ServiceWorker;
 use dom_struct::dom_struct;
 use script_thread::ScriptThread;
 use serviceworkerjob::{Job, JobType};
-use std::ascii::AsciiExt;
 use std::default::Default;
 use std::rc::Rc;
 
@@ -40,7 +39,7 @@ impl ServiceWorkerContainer {
     pub fn new(global: &GlobalScope) -> DomRoot<ServiceWorkerContainer> {
         let client = Client::new(&global.as_window());
         let container = ServiceWorkerContainer::new_inherited(&*client);
-        reflect_dom_object(box container, global, Wrap)
+        reflect_dom_object(Box::new(container), global, Wrap)
     }
 }
 

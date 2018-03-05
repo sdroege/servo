@@ -1,14 +1,32 @@
-# This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0. If a copy of the MPL was not distributed with this file,
-# You can obtain one at http://mozilla.org/MPL/2.0/.
-
-
 import collections
+import json
 
 
 class WebDriverException(Exception):
     http_status = None
     status_code = None
+
+    def __init__(self, message, stacktrace=None):
+        super(WebDriverException, self)
+        self.message = message
+        self.stacktrace = stacktrace
+
+    def __repr__(self):
+        return "<%s http_status=%s>" % (self.__class__.__name__, self.http_status)
+
+    def __str__(self):
+        message = "%s (%s): %s\n" % (self.status_code, self.http_status, self.message)
+        if self.stacktrace:
+            message += ("\n"
+            "Remote-end stacktrace:\n"
+            "\n"
+            "%s" % self.stacktrace)
+        return message
+
+
+class ElementClickInterceptedException(WebDriverException):
+    http_status = 400
+    status_code = "element click intercepted"
 
 
 class ElementNotSelectableException(WebDriverException):
@@ -43,7 +61,7 @@ class InvalidElementCoordinatesException(WebDriverException):
 
 class InvalidElementStateException(WebDriverException):
     http_status = 400
-    status_code = "invalid cookie domain"
+    status_code = "invalid element state"
 
 
 class InvalidSelectorException(WebDriverException):
@@ -67,7 +85,7 @@ class MoveTargetOutOfBoundsException(WebDriverException):
 
 
 class NoSuchAlertException(WebDriverException):
-    http_status = 400
+    http_status = 404
     status_code = "no such alert"
 
 
@@ -77,12 +95,12 @@ class NoSuchElementException(WebDriverException):
 
 
 class NoSuchFrameException(WebDriverException):
-    http_status = 400
+    http_status = 404
     status_code = "no such frame"
 
 
 class NoSuchWindowException(WebDriverException):
-    http_status = 400
+    http_status = 404
     status_code = "no such window"
 
 
@@ -97,7 +115,7 @@ class SessionNotCreatedException(WebDriverException):
 
 
 class StaleElementReferenceException(WebDriverException):
-    http_status = 400
+    http_status = 404
     status_code = "stale element reference"
 
 
@@ -136,11 +154,40 @@ class UnsupportedOperationException(WebDriverException):
     status_code = "unsupported operation"
 
 
-def get(status_code):
-    """Gets exception from `status_code`, falling back to
+def from_response(response):
+    """
+    Unmarshals an error from a ``Response``'s `body`, failing
+    if not all three required `error`, `message`, and `stacktrace`
+    fields are given.  Defaults to ``WebDriverException`` if `error`
+    is unknown.
+    """
+    if response.status == 200:
+        raise UnknownErrorException(
+            "Response is not an error:\n"
+            "%s" % json.dumps(response.body))
+
+    if "value" in response.body:
+        value = response.body["value"]
+    else:
+        raise UnknownErrorException(
+            "Expected 'value' key in response body:\n"
+            "%s" % json.dumps(response.body))
+
+    # all fields must exist, but stacktrace can be an empty string
+    code = value["error"]
+    message = value["message"]
+    stack = value["stacktrace"] or None
+
+    cls = get(code)
+    return cls(message, stacktrace=stack)
+
+
+def get(error_code):
+    """
+    Gets exception from `error_code`, falling back to
     ``WebDriverException`` if it is not found.
     """
-    return _errors.get(status_code, WebDriverException)
+    return _errors.get(error_code, WebDriverException)
 
 
 _errors = collections.defaultdict()

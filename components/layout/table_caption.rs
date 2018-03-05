@@ -9,8 +9,8 @@
 use app_units::Au;
 use block::BlockFlow;
 use context::LayoutContext;
-use display_list_builder::{BlockFlowDisplayListBuilding, DisplayListBuildState};
-use display_list_builder::{StackingContextCollectionFlags, StackingContextCollectionState};
+use display_list::{BlockFlowDisplayListBuilding, DisplayListBuildState};
+use display_list::{StackingContextCollectionFlags, StackingContextCollectionState};
 use euclid::Point2D;
 use flow::{Flow, FlowClass, OpaqueFlow};
 use fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
@@ -19,7 +19,11 @@ use std::fmt;
 use style::logical_geometry::LogicalSize;
 use style::properties::ComputedValues;
 
+#[allow(unsafe_code)]
+unsafe impl ::flow::HasBaseFlow for TableCaptionFlow {}
+
 /// A table formatting context.
+#[repr(C)]
 pub struct TableCaptionFlow {
     pub block_flow: BlockFlow,
 }

@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use core::nonzero::NonZero;
 use dom::bindings::cell::DomRefCell;
 use dom::bindings::codegen::Bindings::VREyeParametersBinding;
 use dom::bindings::codegen::Bindings::VREyeParametersBinding::VREyeParametersMethods;
@@ -15,12 +14,13 @@ use js::jsapi::{Heap, JSContext, JSObject};
 use js::typedarray::{Float32Array, CreateWith};
 use std::default::Default;
 use std::ptr;
+use std::ptr::NonNull;
 use webvr_traits::WebVREyeParameters;
 
 #[dom_struct]
 pub struct VREyeParameters {
     reflector_: Reflector,
-    #[ignore_heap_size_of = "Defined in rust-webvr"]
+    #[ignore_malloc_size_of = "Defined in rust-webvr"]
     parameters: DomRefCell<WebVREyeParameters>,
     offset: Heap<*mut JSObject>,
     fov: Dom<VRFieldOfView>,
@@ -43,12 +43,12 @@ impl VREyeParameters {
         let fov = VRFieldOfView::new(&global, parameters.field_of_view.clone());
 
         let cx = global.get_cx();
-        rooted!(in (cx) let mut array = ptr::null_mut());
+        rooted!(in (cx) let mut array = ptr::null_mut::<JSObject>());
         unsafe {
             let _ = Float32Array::create(cx, CreateWith::Slice(&parameters.offset), array.handle_mut());
         }
 
-        let eye_parameters = reflect_dom_object(box VREyeParameters::new_inherited(parameters, &fov),
+        let eye_parameters = reflect_dom_object(Box::new(VREyeParameters::new_inherited(parameters, &fov)),
                                                 global,
                                                 VREyeParametersBinding::Wrap);
         eye_parameters.offset.set(array.get());
@@ -60,8 +60,8 @@ impl VREyeParameters {
 impl VREyeParametersMethods for VREyeParameters {
     #[allow(unsafe_code)]
     // https://w3c.github.io/webvr/#dom-vreyeparameters-offset
-    unsafe fn Offset(&self, _cx: *mut JSContext) -> NonZero<*mut JSObject> {
-        NonZero::new_unchecked(self.offset.get())
+    unsafe fn Offset(&self, _cx: *mut JSContext) -> NonNull<JSObject> {
+        NonNull::new_unchecked(self.offset.get())
     }
 
     // https://w3c.github.io/webvr/#dom-vreyeparameters-fieldofview

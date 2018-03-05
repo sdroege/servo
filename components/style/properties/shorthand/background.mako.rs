@@ -18,16 +18,17 @@
     use values::specified::{Color, Position, PositionComponent};
     use parser::Parse;
 
+    // FIXME(emilio): Should be the same type!
     impl From<background_origin::single_value::SpecifiedValue> for background_clip::single_value::SpecifiedValue {
         fn from(origin: background_origin::single_value::SpecifiedValue) ->
             background_clip::single_value::SpecifiedValue {
             match origin {
-                background_origin::single_value::SpecifiedValue::content_box =>
-                    background_clip::single_value::SpecifiedValue::content_box,
-                background_origin::single_value::SpecifiedValue::padding_box =>
-                    background_clip::single_value::SpecifiedValue::padding_box,
-                background_origin::single_value::SpecifiedValue::border_box =>
-                    background_clip::single_value::SpecifiedValue::border_box,
+                background_origin::single_value::SpecifiedValue::ContentBox =>
+                    background_clip::single_value::SpecifiedValue::ContentBox,
+                background_origin::single_value::SpecifiedValue::PaddingBox =>
+                    background_clip::single_value::SpecifiedValue::PaddingBox,
+                background_origin::single_value::SpecifiedValue::BorderBox =>
+                    background_clip::single_value::SpecifiedValue::BorderBox,
             }
         }
     }
@@ -47,7 +48,7 @@
             // background-color can only be in the last element, so if it
             // is parsed anywhere before, the value is invalid.
             if background_color.is_some() {
-                return Err(StyleParseError::UnspecifiedError.into());
+                return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
             }
 
             % for name in "image position repeat size attachment origin clip".split():
@@ -112,7 +113,7 @@
                 % endfor
                 Ok(())
             } else {
-                Err(StyleParseError::UnspecifiedError.into())
+                Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
             }
         })?;
 
@@ -130,7 +131,7 @@
     }
 
     impl<'a> ToCss for LonghandsToSerialize<'a>  {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+        fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result where W: fmt::Write {
             let len = self.background_image.0.len();
             // There should be at least one declared value
             if len == 0 {
@@ -177,7 +178,7 @@
                     size.to_css(dest)?;
                 }
 
-                if *origin != Origin::padding_box || *clip != Clip::border_box {
+                if *origin != Origin::PaddingBox || *clip != Clip::BorderBox {
                     dest.write_str(" ")?;
                     origin.to_css(dest)?;
                     if *clip != From::from(*origin) {
@@ -217,7 +218,7 @@
             Ok(())
         })?;
         if !any {
-            return Err(StyleParseError::UnspecifiedError.into());
+            return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
         }
 
         Ok(expanded! {
@@ -227,7 +228,7 @@
     }
 
     impl<'a> ToCss for LonghandsToSerialize<'a>  {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+        fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result where W: fmt::Write {
             let len = self.background_position_x.0.len();
             if len == 0 || len != self.background_position_y.0.len() {
                 return Ok(());

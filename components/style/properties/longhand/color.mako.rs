@@ -39,7 +39,9 @@ pub mod system_colors {
                            -moz-mac-defaultbuttontext -moz-mac-focusring -moz-mac-menuselect
                            -moz-mac-menushadow -moz-mac-menutextdisable -moz-mac-menutextselect
                            -moz-mac-disabledtoolbartext -moz-mac-secondaryhighlight
-                           -moz-mac-vibrancy-light -moz-mac-vibrancy-dark -moz-mac-menupopup
+                           -moz-mac-vibrancy-light -moz-mac-vibrancy-dark
+                           -moz-mac-vibrant-titlebar-light -moz-mac-vibrant-titlebar-dark
+                           -moz-mac-menupopup
                            -moz-mac-menuitem -moz-mac-active-menuitem -moz-mac-source-list
                            -moz-mac-source-list-selection -moz-mac-active-source-list-selection
                            -moz-mac-tooltip
@@ -64,18 +66,21 @@ pub mod system_colors {
     use cssparser::Parser;
     use gecko_bindings::bindings::Gecko_GetLookAndFeelSystemColor;
     use gecko_bindings::structs::root::mozilla::LookAndFeel_ColorID;
-    use std::fmt;
-    use style_traits::ToCss;
+    use std::fmt::{self, Write};
+    use style_traits::{CssWriter, ToCss};
     use values::computed::{Context, ToComputedValue};
 
     pub type SystemColor = LookAndFeel_ColorID;
 
     // It's hard to implement MallocSizeOf for LookAndFeel_ColorID because it
     // is a bindgen type. So we implement it on the typedef instead.
-    size_of_is_0!(SystemColor);
+    malloc_size_of_is_0!(SystemColor);
 
     impl ToCss for SystemColor {
-        fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+        fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+        where
+            W: Write,
+        {
             let s = match *self {
                 % for color in system_colors + extra_colors:
                     LookAndFeel_ColorID::eColorID_${to_rust_ident(color)} => "${color}",

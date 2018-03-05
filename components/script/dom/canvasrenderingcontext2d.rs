@@ -9,7 +9,6 @@ use canvas_traits::canvas::{RadialGradientStyle, RepetitionStyle, byte_swap_and_
 use cssparser::{Parser, ParserInput, RGBA};
 use cssparser::Color as CSSColor;
 use dom::bindings::cell::DomRefCell;
-use dom::bindings::codegen::Bindings::CSSStyleDeclarationBinding::CSSStyleDeclarationMethods;
 use dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding;
 use dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasFillRule;
 use dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasImageSource;
@@ -17,7 +16,6 @@ use dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasLin
 use dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasLineJoin;
 use dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasRenderingContext2DMethods;
 use dom::bindings::codegen::Bindings::ImageDataBinding::ImageDataMethods;
-use dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use dom::bindings::codegen::UnionTypes::StringOrCanvasGradientOrCanvasPattern;
 use dom::bindings::error::{Error, ErrorResult, Fallible};
 use dom::bindings::inheritance::Castable;
@@ -27,10 +25,11 @@ use dom::bindings::root::{Dom, DomRoot, LayoutDom};
 use dom::bindings::str::DOMString;
 use dom::canvasgradient::{CanvasGradient, CanvasGradientStyle, ToFillOrStrokeStyle};
 use dom::canvaspattern::CanvasPattern;
+use dom::element::Element;
 use dom::globalscope::GlobalScope;
 use dom::htmlcanvaselement::HTMLCanvasElement;
 use dom::imagedata::ImageData;
-use dom::node::{document_from_node, Node, NodeDamage, window_from_node};
+use dom::node::{Node, NodeDamage, window_from_node};
 use dom_struct::dom_struct;
 use euclid::{Transform2D, Point2D, Vector2D, Rect, Size2D, vec2};
 use ipc_channel::ipc::{self, IpcSender};
@@ -51,7 +50,7 @@ use std::sync::Arc;
 use unpremultiplytable::UNPREMULTIPLY_TABLE;
 
 #[must_root]
-#[derive(Clone, HeapSizeOf, JSTraceable)]
+#[derive(Clone, JSTraceable, MallocSizeOf)]
 #[allow(dead_code)]
 enum CanvasFillOrStrokeStyle {
     Color(RGBA),
@@ -63,12 +62,12 @@ enum CanvasFillOrStrokeStyle {
 #[dom_struct]
 pub struct CanvasRenderingContext2D {
     reflector_: Reflector,
-    #[ignore_heap_size_of = "Defined in ipc-channel"]
+    #[ignore_malloc_size_of = "Defined in ipc-channel"]
     ipc_renderer: IpcSender<CanvasMsg>,
     /// For rendering contexts created by an HTML canvas element, this is Some,
     /// for ones created by a paint worklet, this is None.
     canvas: Option<Dom<HTMLCanvasElement>>,
-    #[ignore_heap_size_of = "Arc"]
+    #[ignore_malloc_size_of = "Arc"]
     image_cache: Arc<ImageCache>,
     /// Any missing image URLs.
     missing_image_urls: DomRefCell<Vec<ServoUrl>>,
@@ -81,7 +80,7 @@ pub struct CanvasRenderingContext2D {
 }
 
 #[must_root]
-#[derive(Clone, HeapSizeOf, JSTraceable)]
+#[derive(Clone, JSTraceable, MallocSizeOf)]
 struct CanvasContextState {
     global_alpha: f64,
     global_composition: CompositionOrBlending,
@@ -155,7 +154,9 @@ impl CanvasRenderingContext2D {
         let window = window_from_node(canvas);
         let image_cache = window.image_cache();
         let base_url = window.get_url();
-        let boxed = box CanvasRenderingContext2D::new_inherited(global, Some(canvas), image_cache, base_url, size);
+        let boxed = Box::new(CanvasRenderingContext2D::new_inherited(
+            global, Some(canvas), image_cache, base_url, size
+        ));
         reflect_dom_object(boxed, global, CanvasRenderingContext2DBinding::Wrap)
     }
 
@@ -247,13 +248,8 @@ impl CanvasRenderingContext2D {
             CanvasImageSource::CanvasRenderingContext2D(image) =>
                 image.origin_is_clean(),
             CanvasImageSource::HTMLImageElement(image) => {
-                let canvas = match self.canvas {
-                    Some(ref canvas) => canvas,
-                    None => return false,
-                };
                 let image_origin = image.get_origin().expect("Image's origin is missing");
-                let document = document_from_node(&**canvas);
-                document.url().clone().origin() == image_origin
+                image_origin.same_origin(GlobalScope::entry().origin())
             }
             CanvasImageSource::CSSStyleValue(_) => true,
         }
@@ -546,18 +542,11 @@ impl CanvasRenderingContext2D {
                         Some(ref canvas) => &**canvas,
                     };
 
-                    let window = window_from_node(canvas);
+                    let canvas_element = canvas.upcast::<Element>();
 
-                    let style = window.GetComputedStyle(canvas.upcast(), None);
-
-                    let element_not_rendered =
-                        !canvas.upcast::<Node>().is_in_doc() ||
-                        style.GetPropertyValue(DOMString::from("display")) == "none";
-
-                    if element_not_rendered {
-                        Ok(RGBA::new(0, 0, 0, 255))
-                    } else {
-                        self.parse_color(&style.GetPropertyValue(DOMString::from("color")))
+                    match canvas_element.style() {
+                        Some(ref s) if canvas_element.has_css_layout_box() => Ok(s.get_color().color),
+                        _ => Ok(RGBA::new(0, 0, 0, 255))
                     }
                 },
                 _ => Err(())

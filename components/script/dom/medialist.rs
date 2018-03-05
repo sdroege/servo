@@ -18,13 +18,13 @@ use style::media_queries::MediaList as StyleMediaList;
 use style::parser::ParserContext;
 use style::shared_lock::{SharedRwLock, Locked};
 use style::stylesheets::CssRuleType;
-use style_traits::{PARSING_MODE_DEFAULT, ToCss};
+use style_traits::{ParsingMode, ToCss};
 
 #[dom_struct]
 pub struct MediaList {
     reflector_: Reflector,
     parent_stylesheet: Dom<CSSStyleSheet>,
-    #[ignore_heap_size_of = "Arc"]
+    #[ignore_malloc_size_of = "Arc"]
     media_queries: Arc<Locked<StyleMediaList>>,
 }
 
@@ -43,7 +43,7 @@ impl MediaList {
     pub fn new(window: &Window, parent_stylesheet: &CSSStyleSheet,
                media_queries: Arc<Locked<StyleMediaList>>)
         -> DomRoot<MediaList> {
-        reflect_dom_object(box MediaList::new_inherited(parent_stylesheet, media_queries),
+        reflect_dom_object(Box::new(MediaList::new_inherited(parent_stylesheet, media_queries)),
                            window,
                            MediaListBinding::Wrap)
     }
@@ -78,7 +78,7 @@ impl MediaListMethods for MediaList {
         let url = window.get_url();
         let quirks_mode = window.Document().quirks_mode();
         let context = ParserContext::new_for_cssom(&url, Some(CssRuleType::Media),
-                                                   PARSING_MODE_DEFAULT,
+                                                   ParsingMode::DEFAULT,
                                                    quirks_mode);
         *media_queries = parse_media_query_list(&context, &mut parser,
                                                 window.css_error_reporter());
@@ -93,12 +93,11 @@ impl MediaListMethods for MediaList {
     // https://drafts.csswg.org/cssom/#dom-medialist-item
     fn Item(&self, index: u32) -> Option<DOMString> {
         let guard = self.shared_lock().read();
-        self.media_queries.read_with(&guard).media_queries
-        .get(index as usize).and_then(|query| {
-            let mut s = String::new();
-            query.to_css(&mut s).unwrap();
-            Some(DOMString::from_string(s))
-        })
+        self.media_queries
+            .read_with(&guard)
+            .media_queries
+            .get(index as usize)
+            .map(|query| query.to_css_string().into())
     }
 
     // https://drafts.csswg.org/cssom/#dom-medialist-item
@@ -116,7 +115,7 @@ impl MediaListMethods for MediaList {
         let url = win.get_url();
         let quirks_mode = win.Document().quirks_mode();
         let context = ParserContext::new_for_cssom(&url, Some(CssRuleType::Media),
-                                                   PARSING_MODE_DEFAULT,
+                                                   ParsingMode::DEFAULT,
                                                    quirks_mode);
         let m = MediaQuery::parse(&context, &mut parser);
         // Step 2
@@ -145,7 +144,7 @@ impl MediaListMethods for MediaList {
         let url = win.get_url();
         let quirks_mode = win.Document().quirks_mode();
         let context = ParserContext::new_for_cssom(&url, Some(CssRuleType::Media),
-                                                   PARSING_MODE_DEFAULT,
+                                                   ParsingMode::DEFAULT,
                                                    quirks_mode);
         let m = MediaQuery::parse(&context, &mut parser);
         // Step 2

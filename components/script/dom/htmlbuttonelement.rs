@@ -27,10 +27,10 @@ use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix};
 use std::cell::Cell;
 use std::default::Default;
-use style::element_state::*;
+use style::element_state::ElementState;
 
 #[derive(Clone, Copy, JSTraceable, PartialEq)]
-#[derive(HeapSizeOf)]
+#[derive(MallocSizeOf)]
 enum ButtonType {
     Submit,
     Reset,
@@ -51,7 +51,7 @@ impl HTMLButtonElement {
                      document: &Document) -> HTMLButtonElement {
         HTMLButtonElement {
             htmlelement:
-                HTMLElement::new_inherited_with_state(IN_ENABLED_STATE,
+                HTMLElement::new_inherited_with_state(ElementState::IN_ENABLED_STATE,
                                                       local_name, prefix, document),
             button_type: Cell::new(ButtonType::Submit),
             form_owner: Default::default(),
@@ -62,7 +62,7 @@ impl HTMLButtonElement {
     pub fn new(local_name: LocalName,
                prefix: Option<Prefix>,
                document: &Document) -> DomRoot<HTMLButtonElement> {
-        Node::reflect_node(box HTMLButtonElement::new_inherited(local_name, prefix, document),
+        Node::reflect_node(Box::new(HTMLButtonElement::new_inherited(local_name, prefix, document)),
                            document,
                            HTMLButtonElementBinding::Wrap)
     }
@@ -93,7 +93,7 @@ impl HTMLButtonElementMethods for HTMLButtonElement {
     make_setter!(SetType, "type");
 
     // https://html.spec.whatwg.org/multipage/#dom-fs-formaction
-    make_url_or_base_getter!(FormAction, "formaction");
+    make_form_action_getter!(FormAction, "formaction");
 
     // https://html.spec.whatwg.org/multipage/#dom-fs-formaction
     make_setter!(SetFormAction, "formaction");
@@ -144,7 +144,7 @@ impl HTMLButtonElementMethods for HTMLButtonElement {
 }
 
 impl HTMLButtonElement {
-    /// https://html.spec.whatwg.org/multipage/#constructing-the-form-data-set
+    /// <https://html.spec.whatwg.org/multipage/#constructing-the-form-data-set>
     /// Steps range from 3.1 to 3.7 (specific to HTMLButtonElement)
     pub fn form_datum(&self, submitter: Option<FormSubmitter>) -> Option<FormDatum> {
         // Step 3.1: disabled state check is in get_unclean_dataset

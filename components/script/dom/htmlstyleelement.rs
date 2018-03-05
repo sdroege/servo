@@ -12,7 +12,6 @@ use dom::bindings::root::{DomRoot, MutNullableDom};
 use dom::cssstylesheet::CSSStyleSheet;
 use dom::document::Document;
 use dom::element::{Element, ElementCreator};
-use dom::eventtarget::EventTarget;
 use dom::htmlelement::HTMLElement;
 use dom::node::{ChildrenMutation, Node, UnbindContext, document_from_node, window_from_node};
 use dom::stylesheet::StyleSheet as DOMStyleSheet;
@@ -25,16 +24,16 @@ use std::cell::Cell;
 use style::media_queries::parse_media_query_list;
 use style::parser::ParserContext as CssParserContext;
 use style::stylesheets::{CssRuleType, Stylesheet, Origin};
-use style_traits::PARSING_MODE_DEFAULT;
+use style_traits::ParsingMode;
 use stylesheet_loader::{StylesheetLoader, StylesheetOwner};
 
 #[dom_struct]
 pub struct HTMLStyleElement {
     htmlelement: HTMLElement,
-    #[ignore_heap_size_of = "Arc"]
+    #[ignore_malloc_size_of = "Arc"]
     stylesheet: DomRefCell<Option<Arc<Stylesheet>>>,
     cssom_stylesheet: MutNullableDom<CSSStyleSheet>,
-    /// https://html.spec.whatwg.org/multipage/#a-style-sheet-that-is-blocking-scripts
+    /// <https://html.spec.whatwg.org/multipage/#a-style-sheet-that-is-blocking-scripts>
     parser_inserted: Cell<bool>,
     in_stack_of_open_elements: Cell<bool>,
     pending_loads: Cell<u32>,
@@ -64,7 +63,7 @@ impl HTMLStyleElement {
                prefix: Option<Prefix>,
                document: &Document,
                creator: ElementCreator) -> DomRoot<HTMLStyleElement> {
-        Node::reflect_node(box HTMLStyleElement::new_inherited(local_name, prefix, document, creator),
+        Node::reflect_node(Box::new(HTMLStyleElement::new_inherited(local_name, prefix, document, creator)),
                            document,
                            HTMLStyleElementBinding::Wrap)
     }
@@ -87,7 +86,7 @@ impl HTMLStyleElement {
         let url = window.get_url();
         let context = CssParserContext::new_for_cssom(&url,
                                                       Some(CssRuleType::Media),
-                                                      PARSING_MODE_DEFAULT,
+                                                      ParsingMode::DEFAULT,
                                                       doc.quirks_mode());
         let shared_lock = node.owner_doc().style_shared_lock().clone();
         let mut input = ParserInput::new(&mq_str);
@@ -105,9 +104,10 @@ impl HTMLStyleElement {
 
         let sheet = Arc::new(sheet);
 
-        // No subresource loads were triggered, just fire the load event now.
+        // No subresource loads were triggered, queue load event
         if self.pending_loads.get() == 0 {
-            self.upcast::<EventTarget>().fire_event(atom!("load"));
+            let window = window_from_node(self);
+            window.dom_manipulation_task_source().queue_simple_event(self.upcast(), atom!("load"), &window);
         }
 
         self.set_stylesheet(sheet);

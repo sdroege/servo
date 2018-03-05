@@ -49,7 +49,7 @@ impl MediaQueryList {
     }
 
     pub fn new(document: &Document, media_query_list: MediaList) -> DomRoot<MediaQueryList> {
-        reflect_dom_object(box MediaQueryList::new_inherited(document, media_query_list),
+        reflect_dom_object(Box::new(MediaQueryList::new_inherited(document, media_query_list)),
                            document.window(),
                            MediaQueryListBinding::Wrap)
     }
@@ -83,9 +83,7 @@ impl MediaQueryList {
 impl MediaQueryListMethods for MediaQueryList {
     // https://drafts.csswg.org/cssom-view/#dom-mediaquerylist-media
     fn Media(&self) -> DOMString {
-        let mut s = String::new();
-        self.media_query_list.to_css(&mut s).unwrap();
-        DOMString::from_string(s)
+        self.media_query_list.to_css_string().into()
     }
 
     // https://drafts.csswg.org/cssom-view/#dom-mediaquerylist-matches
@@ -118,7 +116,7 @@ impl MediaQueryListMethods for MediaQueryList {
     event_handler!(change, GetOnchange, SetOnchange);
 }
 
-#[derive(HeapSizeOf)]
+#[derive(MallocSizeOf)]
 pub struct WeakMediaQueryListVec {
     cell: DomRefCell<WeakRefVec<MediaQueryList>>,
 }
@@ -134,7 +132,7 @@ impl WeakMediaQueryListVec {
     }
 
     /// Evaluate media query lists and report changes
-    /// https://drafts.csswg.org/cssom-view/#evaluate-media-queries-and-report-changes
+    /// <https://drafts.csswg.org/cssom-view/#evaluate-media-queries-and-report-changes>
     pub fn evaluate_and_report_changes(&self) {
         rooted_vec!(let mut mql_list);
         self.cell.borrow_mut().update(|mql| {

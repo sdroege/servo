@@ -2,19 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#![cfg_attr(feature = "unstable", feature(core_intrinsics))]
+#![cfg_attr(feature = "unstable", feature(on_unimplemented))]
 #![feature(ascii_ctype)]
-#![feature(box_syntax)]
 #![feature(conservative_impl_trait)]
 #![feature(const_fn)]
-#![feature(const_ptr_null)]
-#![feature(const_ptr_null_mut)]
-#![feature(core_intrinsics)]
 #![feature(mpsc_select)]
-#![feature(nonzero)]
-#![feature(on_unimplemented)]
 #![feature(plugin)]
 #![feature(proc_macro)]
-#![feature(try_from)]
+#![feature(splice)]
+#![feature(string_retain)]
 
 #![deny(unsafe_code)]
 #![allow(non_snake_case)]
@@ -22,10 +19,10 @@
 #![doc = "The script crate contains all matters DOM."]
 
 #![plugin(script_plugins)]
+#![cfg_attr(not(feature = "unrooted_must_root_lint"), allow(unknown_lints))]
 
 extern crate angle;
 extern crate app_units;
-extern crate audio_video_metadata;
 extern crate base64;
 #[macro_use]
 extern crate bitflags;
@@ -33,21 +30,19 @@ extern crate bluetooth_traits;
 extern crate byteorder;
 extern crate canvas_traits;
 extern crate caseless;
+extern crate chrono;
 extern crate cookie as cookie_rs;
-extern crate core;
 #[macro_use] extern crate cssparser;
 #[macro_use] extern crate deny_public_fields;
 extern crate devtools_traits;
 extern crate dom_struct;
 #[macro_use]
 extern crate domobject_derive;
-extern crate encoding;
+extern crate encoding_rs;
 extern crate euclid;
 extern crate fnv;
 extern crate gleam;
 extern crate half;
-#[macro_use] extern crate heapsize;
-#[macro_use] extern crate heapsize_derive;
 #[macro_use] extern crate html5ever;
 #[macro_use]
 extern crate hyper;
@@ -55,26 +50,28 @@ extern crate hyper_serde;
 extern crate image;
 extern crate ipc_channel;
 #[macro_use]
-extern crate js;
-#[macro_use]
 extern crate jstraceable_derive;
 #[macro_use]
 extern crate lazy_static;
 extern crate libc;
 #[macro_use]
 extern crate log;
+#[macro_use] extern crate malloc_size_of;
+#[macro_use] extern crate malloc_size_of_derive;
 extern crate metrics;
 #[macro_use]
 extern crate mime;
 extern crate mime_guess;
 extern crate mitochondria;
+#[macro_use]
+extern crate mozjs as js;
 extern crate msg;
 extern crate net_traits;
 extern crate num_traits;
 extern crate offscreen_gl_context;
-extern crate open;
 extern crate parking_lot;
 extern crate phf;
+extern crate playground;
 #[macro_use]
 extern crate profile_traits;
 extern crate ref_filter_map;
@@ -84,6 +81,7 @@ extern crate script_layout_interface;
 extern crate script_traits;
 extern crate selectors;
 extern crate serde;
+extern crate servo_allocator;
 extern crate servo_arc;
 #[macro_use] extern crate servo_atoms;
 extern crate servo_config;
@@ -145,8 +143,7 @@ pub mod layout_exports {
     pub use dom::characterdata::LayoutCharacterDataHelpers;
     pub use dom::document::{Document, LayoutDocumentHelpers, PendingRestyle};
     pub use dom::element::{Element, LayoutElementHelpers, RawLayoutElementHelpers};
-    pub use dom::node::{CAN_BE_FRAGMENTED, HAS_DIRTY_DESCENDANTS, IS_IN_DOC};
-    pub use dom::node::{HANDLED_SNAPSHOT, HAS_SNAPSHOT};
+    pub use dom::node::NodeFlags;
     pub use dom::node::{LayoutNodeHelpers, Node};
     pub use dom::text::Text;
 }

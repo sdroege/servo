@@ -757,7 +757,7 @@ impl<K, V> RawTable<K, V> {
                                                                         align_of::<(K, V)>());
 
         if oflo {
-            return Err(FailedAllocationError { reason: "capacity overflow when allocating RawTable" });
+            return Err(FailedAllocationError::new("capacity overflow when allocating RawTable" ));
         }
 
         // One check for overflow that covers calculation and rounding of size.
@@ -767,21 +767,22 @@ impl<K, V> RawTable<K, V> {
 
         if let Some(cap_bytes) = cap_bytes {
             if size < cap_bytes {
-                return Err(FailedAllocationError { reason: "capacity overflow when allocating RawTable" });
+                return Err(FailedAllocationError::new("capacity overflow when allocating RawTable"));
             }
         } else {
-            
-            return Err(FailedAllocationError { reason: "capacity overflow when allocating RawTable" });
+            return Err(FailedAllocationError::new("capacity overflow when allocating RawTable"));
         }
 
 
-
         // FORK NOTE: Uses alloc shim instead of Heap.alloc
-        let buffer = alloc(round_up_to_page_size(size), alignment);
-        
+        let buffer = alloc(size, alignment);
+
         if buffer.is_null() {
-            
-            return Err(FailedAllocationError { reason: "out of memory when allocating RawTable" });
+            use AllocationInfo;
+            return Err(FailedAllocationError {
+                reason: "out of memory when allocating RawTable",
+                allocation_info: Some(AllocationInfo { size, alignment }),
+            });
         }
 
         let hashes = buffer.offset(hash_offset as isize) as *mut HashUint;
@@ -812,24 +813,6 @@ impl<K, V> RawTable<K, V> {
             }
         }
     }
-
-    /// Access to the raw buffer backing this table.
-    pub fn raw_buffer(&self) -> (*const (), usize) {
-        debug_assert!(self.capacity() != 0);
-
-        let buffer = self.hashes.ptr() as *const ();
-        let size = {
-            let hashes_size = self.capacity() * size_of::<HashUint>();
-            let pairs_size = self.capacity() * size_of::<(K, V)>();
-            let (_, _, size, _) = calculate_allocation(hashes_size,
-                                                       align_of::<HashUint>(),
-                                                       pairs_size,
-                                                       align_of::<(K, V)>());
-            round_up_to_page_size(size)
-        };
-        (buffer, size)
-    }
-
 
     /// Creates a new raw table from a given capacity. All buckets are
     /// initially empty.
@@ -1218,20 +1201,4 @@ impl<K, V> Drop for RawTable<K, V> {
             // during initialization? We only need one call to free here.
         }
     }
-}
-
-// Force all allocations to fill their pages for the duration of the mprotect
-// experiment.
-#[inline]
-fn round_up_to_page_size(size: usize) -> usize {
-    let page_size = ::SYSTEM_PAGE_SIZE.load(::std::sync::atomic::Ordering::Relaxed);
-    debug_assert!(page_size != 0);
-    let mut result = size;
-    let remainder = size % page_size;
-    if remainder != 0 {
-        result += page_size - remainder;
-    }
-    debug_assert!(result % page_size == 0);
-    debug_assert!(result - size < page_size);
-    result
 }

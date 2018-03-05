@@ -70,6 +70,16 @@ impl CharacterData {
     fn content_changed(&self) {
         let node = self.upcast::<Node>();
         node.dirty(NodeDamage::OtherNodeDamage);
+
+        // If this is a Text node, we might need to re-parse (say, if our parent
+        // is a <style> element.) We don't need to if this is a Comment or
+        // ProcessingInstruction.
+        if self.is::<Text>() {
+            if let Some(parent_node) = node.GetParentNode() {
+                let mutation = ChildrenMutation::ChangeText;
+                vtable_for(&parent_node).children_changed(&mutation);
+            }
+        }
     }
 }
 
@@ -87,16 +97,6 @@ impl CharacterDataMethods for CharacterData {
         self.content_changed();
         let node = self.upcast::<Node>();
         node.ranges().replace_code_units(node, 0, old_length, new_length);
-
-        // If this is a Text node, we might need to re-parse (say, if our parent
-        // is a <style> element.) We don't need to if this is a Comment or
-        // ProcessingInstruction.
-        if self.is::<Text>() {
-            if let Some(parent_node) = node.GetParentNode() {
-                let mutation = ChildrenMutation::ChangeText;
-                vtable_for(&parent_node).children_changed(&mutation);
-            }
-        }
     }
 
     // https://dom.spec.whatwg.org/#dom-characterdata-length
@@ -291,7 +291,7 @@ fn split_at_utf16_code_unit_offset(s: &str, offset: u32) -> Result<(&str, Option
         if c > '\u{FFFF}' {
             if code_units == offset {
                 if opts::get().replace_surrogates {
-                    debug_assert!(c.len_utf8() == 4);
+                    debug_assert_eq!(c.len_utf8(), 4);
                     return Ok((&s[..i], Some(c), &s[i + c.len_utf8()..]))
                 }
                 panic!("\n\n\

@@ -9,8 +9,8 @@
 
 use cssparser::RGBA;
 use std::f32::consts::PI;
-use std::fmt;
-use style_traits::ToCss;
+use std::fmt::{self, Write};
+use style_traits::{CssWriter, ToCss};
 use values::{Either, None_};
 use values::computed::{Angle, ComputedUrl, Context, Length, LengthOrPercentage, NumberOrPercentage, ToComputedValue};
 #[cfg(feature = "gecko")]
@@ -27,11 +27,11 @@ use values::specified::position::{X, Y};
 pub type ImageLayer = Either<None_, Image>;
 
 /// Computed values for an image according to CSS-IMAGES.
-/// https://drafts.csswg.org/css-images/#image-values
+/// <https://drafts.csswg.org/css-images/#image-values>
 pub type Image = GenericImage<Gradient, MozImageRect, ComputedUrl>;
 
 /// Computed values for a CSS gradient.
-/// https://drafts.csswg.org/css-images/#gradients
+/// <https://drafts.csswg.org/css-images/#gradients>
 pub type Gradient = GenericGradient<
     LineDirection,
     Length,
@@ -51,9 +51,7 @@ pub type GradientKind = GenericGradientKind<
 >;
 
 /// A computed gradient line direction.
-#[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq)]
 pub enum LineDirection {
     /// An angle.
     Angle(Angle),
@@ -101,8 +99,13 @@ impl GenericLineDirection for LineDirection {
         }
     }
 
-    fn to_css<W>(&self, dest: &mut W, compat_mode: CompatMode) -> fmt::Result
-        where W: fmt::Write
+    fn to_css<W>(
+        &self,
+        dest: &mut CssWriter<W>,
+        compat_mode: CompatMode,
+    ) -> fmt::Result
+    where
+        W: Write,
     {
         match *self {
             LineDirection::Angle(ref angle) => angle.to_css(dest),

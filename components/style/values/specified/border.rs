@@ -19,9 +19,7 @@ use values::specified::{AllowQuirks, Number, NumberOrPercentage};
 use values::specified::length::{Length, LengthOrPercentage, NonNegativeLength};
 
 /// A specified value for a single side of the `border-width` property.
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Clone, Debug, PartialEq, ToCss)]
+#[derive(Clone, Debug, MallocSizeOf, PartialEq, ToCss)]
 pub enum BorderSideWidth {
     /// `thin`
     Thin,
@@ -62,7 +60,7 @@ impl BorderSideWidth {
         if let Ok(length) = input.try(|i| Length::parse_non_negative_quirky(context, i, allow_quirks)) {
             return Ok(BorderSideWidth::Length(length));
         }
-        try_match_ident_ignore_ascii_case! { input.expect_ident()?,
+        try_match_ident_ignore_ascii_case! { input,
             "thin" => Ok(BorderSideWidth::Thin),
             "medium" => Ok(BorderSideWidth::Medium),
             "thick" => Ok(BorderSideWidth::Thick),
@@ -171,5 +169,41 @@ impl Parse for BorderSpacing {
         Size::parse_with(context, input, |context, input| {
             Length::parse_non_negative_quirky(context, input, AllowQuirks::Yes).map(From::from)
         }).map(GenericBorderSpacing)
+    }
+}
+
+/// A single border-image-repeat keyword.
+#[allow(missing_docs)]
+#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
+#[derive(Clone, Copy, Debug, Eq, MallocSizeOf, Parse, PartialEq, ToCss)]
+pub enum BorderImageRepeatKeyword {
+    Stretch,
+    Repeat,
+    Round,
+    Space,
+}
+
+/// The specified value for the `border-image-repeat` property.
+///
+/// https://drafts.csswg.org/css-backgrounds/#the-border-image-repeat
+#[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq, ToCss)]
+pub struct BorderImageRepeat(pub BorderImageRepeatKeyword, pub Option<BorderImageRepeatKeyword>);
+
+impl BorderImageRepeat {
+    /// Returns the `stretch` value.
+    #[inline]
+    pub fn stretch() -> Self {
+        BorderImageRepeat(BorderImageRepeatKeyword::Stretch, None)
+    }
+}
+
+impl Parse for BorderImageRepeat {
+    fn parse<'i, 't>(
+        _context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self, ParseError<'i>> {
+        let horizontal = BorderImageRepeatKeyword::parse(input)?;
+        let vertical = input.try(BorderImageRepeatKeyword::parse).ok();
+        Ok(BorderImageRepeat(horizontal, vertical))
     }
 }
