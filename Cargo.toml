@@ -25,3 +25,4 @@ opt-level = 3
 #
 #     [patch."https://github.com/servo/<repository>"]
 #     <crate> = { path = "/path/to/local/checkout" }
+pkg-config = { git="https://github.com/alexcrichton/pkg-config-rs", rev="40bccda51814da886289a968c1f5844e856e1e37" }
